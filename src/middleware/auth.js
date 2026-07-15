@@ -34,6 +34,12 @@ async function verifyGoogleToken(idToken) {
 }
 
 async function appAuth(req, res, next) {
+  // Dev mode: skip auth entirely until F1 OAuth setup is done.
+  // NEVER leave this on in production — anyone could use your AI budget.
+  if (process.env.AUTH_DISABLED === "true") {
+    req.user = { sub: "anonymous-dev", email: null, name: "Dev User" };
+    return next();
+  }
   try {
     const authz = req.get("Authorization") || "";
     if (authz.startsWith("Bearer ")) {
