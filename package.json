@@ -1,0 +1,17 @@
+{
+  "name": "myassistant-backend",
+  "version": "0.1.0",
+  "description": "MYASSISTANT backend — AI routing, remote config, user services",
+  "main": "src/server.js",
+  "scripts": {
+    "start": "node src/server.js",
+    "dev": "node --watch src/server.js"
+  },
+  "engines": { "node": ">=20" },
+  "dependencies": {
+    "express": "^4.19.2",
+    "express-rate-limit": "^7.4.0",
+    "helmet": "^7.1.0",
+    "dotenv": "^16.4.5"
+  }
+}
