@@ -1,0 +1,9 @@
+# MYASSISTANT_BACKEND — place in repo root next to the Dockerfile
+# Usage: cp .env.example .env  (fill in keys)  →  docker compose up --build
+services:
+  backend:
+    build: .
+    ports:
+      - "3000:3000"
+    env_file: .env
+    restart: unless-stopped
