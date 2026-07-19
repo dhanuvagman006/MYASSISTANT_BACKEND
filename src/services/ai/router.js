@@ -33,7 +33,7 @@ const TIMEOUT_MS = 30_000;
 
 // ---------------- GROQ (OpenAI-compatible API) ----------------
 
-async function callGroq(messages) {
+async function callGroq(messages, system = SYSTEM_PROMPT) {
   const key = process.env.GROQ_API_KEY;
   if (!key) throw new Error("groq: key missing");
   const model = process.env.GROQ_MODEL || "llama-3.3-70b-versatile";
@@ -48,7 +48,7 @@ async function callGroq(messages) {
     body: JSON.stringify({
       model,
       messages: [
-        { role: "system", content: SYSTEM_PROMPT },
+        { role: "system", content: system },
         ...messages.map((m) => ({ role: m.role, content: m.content })),
       ],
       temperature: 0.6,
@@ -62,7 +62,7 @@ async function callGroq(messages) {
 
 // ---------------- GEMINI ----------------
 
-async function callGemini(messages) {
+async function callGemini(messages, system = SYSTEM_PROMPT) {
   const key = process.env.GEMINI_API_KEY;
   if (!key) throw new Error("gemini: key missing");
   const model = process.env.GEMINI_MODEL || "gemini-2.0-flash";
@@ -78,7 +78,7 @@ async function callGemini(messages) {
       },
       signal: AbortSignal.timeout(TIMEOUT_MS),
       body: JSON.stringify({
-        system_instruction: { parts: [{ text: SYSTEM_PROMPT }] },
+        system_instruction: { parts: [{ text: system }] },
         contents: messages.map((m) => ({
           role: m.role === "assistant" ? "model" : "user",
           parts: [{ text: m.content }],
@@ -106,7 +106,15 @@ function chain() {
   return order;
 }
 
-async function generateReply(messages) {
+/**
+ * @param {Array} messages
+ * @param {Object} [opts]
+ * @param {string} [opts.extraSystem] appended to the base system prompt —
+ *        used to inject the caller's per-user memory block.
+ * @param {string} [opts.system] full replacement system prompt (extractor).
+ */
+async function generateReply(messages, opts = {}) {
+  const system = opts.system || SYSTEM_PROMPT + (opts.extraSystem || "");
   const order = chain();
   if (order.length === 0) {
     throw new Error("no AI provider configured — set GROQ_API_KEY and/or GEMINI_API_KEY");
@@ -117,7 +125,7 @@ async function generateReply(messages) {
     const name = order[i];
     const isLast = i === order.length - 1;
     try {
-      return { reply: await PROVIDERS[name].call(messages), provider: name };
+      return { reply: await PROVIDERS[name].call(messages, system), provider: name };
     } catch (e) {
       errors.push(e.message);
       const msg = String(e.message);
@@ -126,7 +134,7 @@ async function generateReply(messages) {
       if (isLast && transient) {
         await new Promise((res) => setTimeout(res, 800));
         try {
-          return { reply: await PROVIDERS[name].call(messages), provider: name };
+          return { reply: await PROVIDERS[name].call(messages, system), provider: name };
         } catch (e2) {
           errors.push(e2.message);
         }

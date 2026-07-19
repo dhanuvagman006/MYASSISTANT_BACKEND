@@ -91,4 +91,4 @@ function publicUser(u) {
   return { id: u.id, email: u.email, name: u.name, provider: u.provider };
 }
 
-module.exports = { findByEmail, findById, upsertSocialUser, createUser, publicUser };
+module.exports = { db, findByEmail, findById, upsertSocialUser, createUser, publicUser };

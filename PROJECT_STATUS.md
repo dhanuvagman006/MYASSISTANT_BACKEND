@@ -58,3 +58,22 @@ curl localhost:3000/health
 ## Security notes for the next session
 - A GitHub PAT was pasted into a previous chat and used for pushes; it must be **revoked/rotated**.
 - Rate limit: 60 req/min/IP via express-rate-limit; helmet enabled; JSON body capped at 2 MB.
+
+## Update — 19 July 2026: Per-user memory (personalization)
+- **`src/memory/store.js`** — `memories` table (same SQLite DB). UNIQUE(user_id,key)
+  → upsert, never duplicates. Cap 200/user; oldest AI fact evicted first,
+  signup/user facts protected. `buildMemoryPrompt()` renders a ≤2.2k-char
+  system-prompt block.
+- **`src/memory/extractor.js`** — after every /chat reply, fire-and-forget AI call
+  (same provider chain) extracts NEW durable facts as strict JSON. Guardrails:
+  no moods/one-offs, no passwords/IDs/health, 15s per-user throttle, max 4 facts
+  per exchange, every field re-validated before DB write.
+- **`src/routes/memory.js`** (mounted at `/memory`, behind appAuth) —
+  GET list · POST add ("user" source) · DELETE /:id · DELETE / clear-all.
+  Dev/X-App-Key sessions get 400 (memory needs a real account).
+- **`/chat`** now injects the user's memory block into the system prompt on every
+  reply and triggers extraction after responding (never blocks the response).
+- **Sign-up seeding** — email signup stores name+email; **Google sign-in stores
+  name, given_name, email, photo, locale** from the verified ID token (refreshed
+  every sign-in); Apple stores name+email.
+- Tested end-to-end: signup seeding ✓, upsert dedupe ✓, delete/clear ✓, prompt ✓.

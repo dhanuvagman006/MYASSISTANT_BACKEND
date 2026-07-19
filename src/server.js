@@ -46,6 +46,9 @@ app.use(
 // Chat requires the app key so strangers can't burn your AI credits
 app.use("/chat", appAuth, chatRoute);
 
+// Per-user memory management (list / add / forget) for the privacy screen.
+app.use("/memory", appAuth, require("./routes/memory"));
+
 // Voice transcription (Whisper via Groq) — same auth as chat
 app.use("/stt", appAuth, sttRoute);
 
