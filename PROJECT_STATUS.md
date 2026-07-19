@@ -91,3 +91,19 @@ curl localhost:3000/health
 - **POST /memory/interview {question, answer}** — extractor runs immediately
   (`force` skips the 15s throttle, returns saved facts); raw-answer fallback
   keyed by question when extraction yields nothing.
+
+## Update — 19 July 2026 (4): Assistant tools (intent layer)
+- **`src/services/intents.js`** — runs before the AI on every /chat:
+  · always injects current date/time in the user's timezone (X-TZ-Offset header)
+  · "remind me…" → chrono-node parses the time on the USER'S clock, creates the
+    reminder row deterministically, tells the AI to confirm (tested: "tomorrow
+    at 5pm" IST → correct instant; "at 9 in the morning" rolls forward)
+  · reminder listing, live weather (city in query > X-Geo-Lat/Lng headers >
+    memory current_city), news headlines — injected as TOOL RESULT blocks the
+    AI must answer from, phrased in the user's language.
+- **`src/reminders/`** — store (SQLite, same DB) + CRUD routes at /reminders.
+- **`src/services/tools/weather.js`** — Open-Meteo (keyless) + geocoding, WMO
+  code → text, 10-min cache. **tools/news.js** — Google News RSS, 10-min cache.
+  GET /tools/weather?lat&lng|city and /tools/news for the Today screen.
+  (External APIs unreachable from the dev sandbox; verify once deployed.)
+- deps: + chrono-node.

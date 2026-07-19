@@ -49,6 +49,33 @@ app.use("/chat", appAuth, chatRoute);
 // Per-user memory management (list / add / forget) for the privacy screen.
 app.use("/memory", appAuth, require("./routes/memory"));
 
+// Reminders (voice-created via /chat intents + Today screen CRUD).
+app.use("/reminders", appAuth, require("./reminders/routes"));
+
+// Live data for the Today screen (weather card, headlines).
+const wxTool = require("./services/tools/weather");
+const newsTool = require("./services/tools/news");
+app.get("/tools/weather", appAuth, async (req, res) => {
+  try {
+    const w = await wxTool.getWeather({
+      lat: parseFloat(req.query.lat),
+      lng: parseFloat(req.query.lng),
+      city: req.query.city,
+    });
+    if (!w) return res.status(400).json({ error: "lat/lng or city required" });
+    res.json(w);
+  } catch (e) {
+    res.status(502).json({ error: "weather unavailable" });
+  }
+});
+app.get("/tools/news", appAuth, async (req, res) => {
+  try {
+    res.json({ headlines: await newsTool.getHeadlines({ topic: req.query.topic }) });
+  } catch (e) {
+    res.status(502).json({ error: "news unavailable" });
+  }
+});
+
 // Voice transcription (Whisper via Groq) — same auth as chat
 app.use("/stt", appAuth, sttRoute);
 

@@ -2,6 +2,7 @@ const router = require("express").Router();
 const { generateReply } = require("../services/ai/router");
 const { buildMemoryPrompt } = require("../memory/store");
 const { extractAndSave } = require("../memory/extractor");
+const { buildToolContext } = require("../services/intents");
 
 /** Numeric DB user id for signed-in accounts; null for dev/app-key sessions. */
 function userIdOf(req) {
@@ -25,7 +26,16 @@ router.post("/", async (req, res) => {
   try {
     // Personalization: everything Hari knows about THIS user rides along
     // as an addition to the system prompt on every single reply.
-    const extraSystem = userId ? buildMemoryPrompt(userId) : "";
+    // Tools: intents (reminders/weather/news/clock) run first — they may
+    // EXECUTE actions and inject live data the AI must answer from.
+    const toolBlock = await buildToolContext({
+      userId,
+      messages: trimmed,
+      tzOffsetMin: Number(req.get("X-TZ-Offset")) || 330,
+      lat: parseFloat(req.get("X-Geo-Lat")),
+      lng: parseFloat(req.get("X-Geo-Lng")),
+    });
+    const extraSystem = (userId ? buildMemoryPrompt(userId) : "") + toolBlock;
     const { reply, provider } = await generateReply(trimmed, { extraSystem });
     res.json({ reply: reply || "Sorry, I couldn't answer that.", sources: [], provider });
 
