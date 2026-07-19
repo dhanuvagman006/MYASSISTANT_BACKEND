@@ -11,15 +11,23 @@ const SYSTEM_PROMPT =
   "other language they use, including mixed usage. Be concise. Decline harmful " +
   "requests politely.";
 
-async function callGemini(messages) {
+const GEMINI_TIMEOUT_MS = 30_000;
+
+async function callGemini(messages, { retry = true } = {}) {
   const key = process.env.GEMINI_API_KEY;
   if (!key) throw new Error("gemini key missing");
   const model = process.env.GEMINI_MODEL || "gemini-2.0-flash";
+
+  // Key goes in a header, never the URL — URLs end up in proxy/server logs.
   const r = await fetch(
-    `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${key}`,
+    `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent`,
     {
       method: "POST",
-      headers: { "content-type": "application/json" },
+      headers: {
+        "content-type": "application/json",
+        "x-goog-api-key": key,
+      },
+      signal: AbortSignal.timeout(GEMINI_TIMEOUT_MS),
       body: JSON.stringify({
         system_instruction: { parts: [{ text: SYSTEM_PROMPT }] },
         contents: messages.map((m) => ({
@@ -28,8 +36,19 @@ async function callGemini(messages) {
         })),
       }),
     }
-  );
-  if (!r.ok) throw new Error(`gemini ${r.status}`);
+  ).catch((e) => {
+    // Timeouts/network blips: one retry, then give up.
+    if (retry) return null;
+    throw e;
+  });
+
+  // Retry once on transient failures (timeout, 429, 5xx)
+  if (retry && (r === null || r.status === 429 || r.status >= 500)) {
+    await new Promise((res) => setTimeout(res, 800));
+    return callGemini(messages, { retry: false });
+  }
+
+  if (!r || !r.ok) throw new Error(`gemini ${r ? r.status : "network/timeout"}`);
   const data = await r.json();
   return data.candidates?.[0]?.content?.parts?.map((p) => p.text).join("\n") || "";
 }

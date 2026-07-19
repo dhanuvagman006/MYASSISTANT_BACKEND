@@ -29,7 +29,12 @@ async function verifyGoogleToken(idToken) {
 
   // Cache until the token's own expiry (Google ID tokens live ~1 hour)
   tokenCache.set(idToken, { user, exp: p.exp * 1000 });
-  if (tokenCache.size > 10_000) tokenCache.clear(); // crude memory guard
+  if (tokenCache.size > 10_000) {
+    // Evict expired entries first; only wipe everything if that wasn't enough.
+    const now = Date.now();
+    for (const [t, v] of tokenCache) if (v.exp <= now) tokenCache.delete(t);
+    if (tokenCache.size > 10_000) tokenCache.clear();
+  }
   return user;
 }
 
