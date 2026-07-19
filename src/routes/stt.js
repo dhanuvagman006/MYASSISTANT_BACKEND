@@ -1,12 +1,16 @@
 /**
- * SPEECH-TO-TEXT — Whisper on Groq.
+ * SPEECH-TO-TEXT — provider chain, best-for-India first:
  *
- * The app records the question as a small m4a and posts it here;
- * Whisper AUTO-DETECTS the spoken language (Kannada, Hindi, Tamil,
- * English, mixed…) — no locale guessing, unlike the on-device Android
- * recognizer which proved unreliable for regional languages.
+ *   1. SARVAM "Saaras v3" (SARVAM_API_KEY) — built specifically for
+ *      Indian languages, accents and code-mixed speech (Hinglish /
+ *      Kanglish); en-IN Indian English is a first-class language, and
+ *      Indic language ID is its home turf. Our 16kHz mono m4a is its
+ *      ideal input format.
+ *   2. GROQ Whisper large-v3 (GROQ_API_KEY) — solid generalist fallback
+ *      (also covers non-Indian languages Sarvam doesn't).
  *
- * POST /stt  (multipart, field "audio")  ->  { text, language }
+ * Whichever key(s) exist are used; both set = Sarvam first, Whisper on
+ * any Sarvam failure. POST /stt (multipart "audio") -> { text, language }
  */
 const router = require("express").Router();
 const multer = require("multer");
@@ -34,6 +38,53 @@ const HINT_PROMPT = {
   ur: "میں اردو میں بات کر رہا ہوں۔",
 };
 
+// ---------------- SARVAM (Saaras v3) ----------------
+
+// ISO-639-1 → Sarvam BCP-47. Only languages Saaras supports; anything
+// else falls back to auto-detect ("unknown").
+const SARVAM_LANG = {
+  hi: "hi-IN", bn: "bn-IN", kn: "kn-IN", ml: "ml-IN", mr: "mr-IN",
+  or: "od-IN", pa: "pa-IN", ta: "ta-IN", te: "te-IN", en: "en-IN",
+  gu: "gu-IN", as: "as-IN", ur: "ur-IN", ne: "ne-IN", sa: "sa-IN",
+};
+
+async function sarvamTranscribe(key, file, { language, hint } = {}) {
+  const fd = new FormData();
+  fd.append(
+    "file",
+    new Blob([file.buffer], { type: file.mimetype || "audio/m4a" }),
+    file.originalname || "audio.m4a"
+  );
+  fd.append("model", process.env.SARVAM_STT_MODEL || "saaras:v3");
+  fd.append("mode", "transcribe");
+  // Forced language locks it; a hint also locks here (Saaras has no
+  // soft-bias parameter) but its Indic auto-detect is strong enough
+  // that we only lock on the USER'S explicit pick, not the region hint.
+  if (language && SARVAM_LANG[language]) {
+    fd.append("language_code", SARVAM_LANG[language]);
+  } else {
+    fd.append("language_code", "unknown"); // auto-detect (its specialty)
+  }
+
+  const r = await fetch("https://api.sarvam.ai/speech-to-text", {
+    method: "POST",
+    headers: { "api-subscription-key": key },
+    body: fd,
+    signal: AbortSignal.timeout(30_000),
+  });
+  if (!r.ok) {
+    const body = await r.text().catch(() => "");
+    throw new Error(`sarvam ${r.status} ${body.slice(0, 200)}`);
+  }
+  const data = await r.json();
+  return {
+    text: (data.transcript || "").trim(),
+    language: (data.language_code || "unknown").split("-")[0],
+  };
+}
+
+// ---------------- GROQ (Whisper large-v3) ----------------
+
 async function groqTranscribe(key, file, { language, hint } = {}) {
   const fd = new FormData();
   fd.append(
@@ -58,7 +109,9 @@ async function groqTranscribe(key, file, { language, hint } = {}) {
 
 router.post("/", upload.single("audio"), async (req, res) => {
   const key = process.env.GROQ_API_KEY;
-  if (!key) return res.status(503).json({ error: "stt not configured" });
+  if (!key && !process.env.SARVAM_API_KEY) {
+    return res.status(503).json({ error: "stt not configured" });
+  }
   if (!req.file || !req.file.buffer?.length) {
     return res.status(400).json({ error: "audio file required (field 'audio')" });
   }
@@ -69,6 +122,21 @@ router.post("/", upload.single("audio"), async (req, res) => {
   const language = clean(req.body?.language);
   const hint = clean(req.body?.hint);
 
+  // ---- 1) Sarvam: Indian-accent specialist ----
+  const sarvamKey = process.env.SARVAM_API_KEY;
+  if (sarvamKey) {
+    try {
+      const out = await sarvamTranscribe(sarvamKey, req.file, { language, hint });
+      if (out.text) return res.json({ ...out, provider: "sarvam" });
+      // Empty transcript: fall through to Whisper (may be a non-Indian
+      // language Saaras doesn't cover).
+    } catch (e) {
+      console.warn("sarvam stt failed, falling back:", e.message);
+    }
+  }
+
+  // ---- 2) Groq Whisper large-v3 ----
+  if (!key) return res.status(502).json({ error: "transcription failed" });
   try {
     let r = await groqTranscribe(key, req.file, { language, hint });
     // If Groq rejects the forced language (unsupported code), retry free.
@@ -84,6 +152,7 @@ router.post("/", upload.single("audio"), async (req, res) => {
     res.json({
       text: (data.text || "").trim(),
       language: data.language || "unknown",
+      provider: "groq-whisper",
     });
   } catch (e) {
     console.error("stt error:", e.message);

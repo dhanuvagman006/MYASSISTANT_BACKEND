@@ -120,3 +120,14 @@ curl localhost:3000/health
 - Prod env: GOOGLE_WEB_CLIENT_SECRET; enable Gmail + Calendar APIs and both
   readonly scopes. Consent screen "Testing" = refresh tokens expire in 7 days;
   publish/verify for production. Only unlinked-state testable in sandbox.
+
+## Update — 19 July 2026 (6): Indian-accent STT (Sarvam Saaras v3)
+- /stt is now a provider chain: **SARVAM Saaras v3 first** (SARVAM_API_KEY;
+  https://api.sarvam.ai/speech-to-text, api-subscription-key header, model
+  saaras:v3 mode=transcribe) — built for Indian languages/accents/code-mix,
+  en-IN first-class, 24 languages; our 16kHz mono m4a is its ideal input.
+  language_code locked only on the user's explicit pick (ISO→BCP-47 map),
+  else "unknown" auto-detect. **Groq Whisper large-v3 fallback** on any
+  Sarvam failure/empty (also covers non-Indian languages). Response now
+  includes provider. Either key alone works; no key → 503.
+- Get a key at dashboard.sarvam.ai (free tier) → set SARVAM_API_KEY.
