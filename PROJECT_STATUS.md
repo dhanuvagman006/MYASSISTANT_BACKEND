@@ -17,6 +17,8 @@ API server for the MYASSISTANT ("Hari") Flutter app. Endpoints:
    ⚠️ The client contract (Section 5) requires TWO AI providers (primary + fallback) —
    a second provider must be re-added before delivery.
 3. Verified locally: server boots, `/health` and `/config` respond correctly.
+4. **Voice-friendly system prompt** — replies must match the user's language AND script,
+   stay 1–3 spoken sentences, and contain no markdown/emoji/URLs (they are read by TTS).
 
 Last commit at time of writing: `3f51e39` on `main`.
 
