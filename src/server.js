@@ -11,6 +11,7 @@ if (!process.env.JWT_SECRET || process.env.JWT_SECRET.length < 32) {
 
 const configRoute = require("./routes/config");
 const chatRoute = require("./routes/chat");
+const sttRoute = require("./routes/stt");
 const authRoute = require("./routes/auth");
 const { appAuth } = require("./middleware/auth");
 
@@ -43,6 +44,9 @@ app.use(
 
 // Chat requires the app key so strangers can't burn your AI credits
 app.use("/chat", appAuth, chatRoute);
+
+// Voice transcription (Whisper via Groq) — same auth as chat
+app.use("/stt", appAuth, sttRoute);
 
 // JSON 404 for unmatched routes (instead of Express's default HTML page)
 app.use((_req, res) => res.status(404).json({ error: "not found" }));
