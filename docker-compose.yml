@@ -7,3 +7,10 @@ services:
       - "3000:3000"
     env_file: .env
     restart: unless-stopped
+    volumes:
+      # Persist the SQLite user DB across rebuilds/restarts.
+      # Without this, every redeploy would wipe all user accounts.
+      - backend-data:/app/data
+
+volumes:
+  backend-data:
