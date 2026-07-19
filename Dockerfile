@@ -7,8 +7,11 @@
 # ---------- Stage 1: build native deps ----------
 FROM node:20-alpine AS builder
 
-# Toolchain for node-gyp (only exists in this stage)
-RUN apk add --no-cache python3 make g++
+# Toolchain for node-gyp (only exists in this stage).
+# py3-setuptools: newer alpine ships Python 3.12+ where distutils was
+# removed — without it node-gyp fails compiling better-sqlite3 with
+# "No module named 'distutils'".
+RUN apk add --no-cache python3 py3-setuptools make g++
 
 WORKDIR /app
 COPY package.json package-lock.json ./
