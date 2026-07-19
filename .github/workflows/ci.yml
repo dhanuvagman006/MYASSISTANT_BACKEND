@@ -1,0 +1,29 @@
+# CI — runs on every push and pull request.
+# A PR CANNOT be merged into main unless this passes (branch protection).
+name: ci
+on:
+  push:
+    branches: ["**"]
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      # Every route module must at least LOAD (catches typos/bad requires).
+      - name: Module load check
+        run: |
+          JWT_SECRET=$(head -c 48 /dev/urandom | base64) node -e "
+            for (const m of ['./src/routes/chat','./src/routes/auth','./src/routes/memory',
+                             './src/reminders/routes','./src/google/routes','./src/routes/stt',
+                             './src/services/intents','./src/memory/extractor']) require(m);
+            console.log('all modules load');"
+      # Boot the real server and exercise auth/memory/reminders/google.
+      - name: Smoke test
+        run: npm test
