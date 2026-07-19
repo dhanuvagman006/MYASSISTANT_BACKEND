@@ -1,46 +1,19 @@
 /**
- * AUTH — two modes:
+ * REQUEST AUTH for protected routes (/chat, and future user data routes).
  *
- * 1. Google ID token (production, F1): the app sends
- *    `Authorization: Bearer <googleIdToken>`. We verify the signature
- *    against Google's public keys and the audience against our
- *    GOOGLE_WEB_CLIENT_ID. On success, req.user = { sub, email, name }.
- *    `sub` is Google's permanent user ID — use it as the primary key
- *    for memories, reminders and notes.
+ * Priority:
+ *  1. Session JWT (issued by /auth/*) — `Authorization: Bearer <token>`.
+ *     This is the normal production path for email, Google AND Apple users.
+ *  2. X-App-Key shared secret — dev fallback, only when ALLOW_APP_KEY=true.
+ *  3. AUTH_DISABLED=true — dev only; the server refuses to boot with this
+ *     in production (see server.js).
  *
- * 2. X-App-Key shared secret (dev fallback): only honoured when
- *    ALLOW_APP_KEY=true, so it can't be left on in production by accident.
+ * On success: req.user = { sub, email, name } where sub is our DB user id.
  */
-const { OAuth2Client } = require("google-auth-library");
-
-const client = new OAuth2Client();
-const tokenCache = new Map(); // token → { user, exp } to avoid re-verifying every request
-
-async function verifyGoogleToken(idToken) {
-  const cached = tokenCache.get(idToken);
-  if (cached && cached.exp > Date.now()) return cached.user;
-
-  const ticket = await client.verifyIdToken({
-    idToken,
-    audience: process.env.GOOGLE_WEB_CLIENT_ID,
-  });
-  const p = ticket.getPayload();
-  const user = { sub: p.sub, email: p.email, name: p.name };
-
-  // Cache until the token's own expiry (Google ID tokens live ~1 hour)
-  tokenCache.set(idToken, { user, exp: p.exp * 1000 });
-  if (tokenCache.size > 10_000) {
-    // Evict expired entries first; only wipe everything if that wasn't enough.
-    const now = Date.now();
-    for (const [t, v] of tokenCache) if (v.exp <= now) tokenCache.delete(t);
-    if (tokenCache.size > 10_000) tokenCache.clear();
-  }
-  return user;
-}
+const jwt = require("jsonwebtoken");
+const db = require("../db");
 
 async function appAuth(req, res, next) {
-  // Dev mode: skip auth entirely until F1 OAuth setup is done.
-  // NEVER leave this on in production — anyone could use your AI budget.
   if (process.env.AUTH_DISABLED === "true") {
     req.user = { sub: "anonymous-dev", email: null, name: "Dev User" };
     return next();
@@ -48,7 +21,10 @@ async function appAuth(req, res, next) {
   try {
     const authz = req.get("Authorization") || "";
     if (authz.startsWith("Bearer ")) {
-      req.user = await verifyGoogleToken(authz.slice(7));
+      const { uid } = jwt.verify(authz.slice(7), process.env.JWT_SECRET);
+      const user = db.findById(uid);
+      if (!user) return res.status(401).json({ error: "account not found" });
+      req.user = { sub: String(user.id), email: user.email, name: user.name };
       return next();
     }
     if (

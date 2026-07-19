@@ -3,8 +3,15 @@ const express = require("express");
 const helmet = require("helmet");
 const rateLimit = require("express-rate-limit");
 
+// Sessions are signed with this — the server can't run without it.
+if (!process.env.JWT_SECRET || process.env.JWT_SECRET.length < 32) {
+  console.error("FATAL: JWT_SECRET must be set (32+ random characters).");
+  process.exit(1);
+}
+
 const configRoute = require("./routes/config");
 const chatRoute = require("./routes/chat");
+const authRoute = require("./routes/auth");
 const { appAuth } = require("./middleware/auth");
 
 // Safety guard: never boot in production with auth switched off.
@@ -26,6 +33,13 @@ app.get("/health", (_req, res) => res.json({ ok: true, ts: Date.now() }));
 
 // Public within the app: remote config (no secrets inside it)
 app.use("/config", configRoute);
+
+// Sign-up/sign-in — extra-tight limit to slow brute-force attempts
+app.use(
+  "/auth",
+  rateLimit({ windowMs: 15 * 60_000, max: 20, standardHeaders: true }),
+  authRoute
+);
 
 // Chat requires the app key so strangers can't burn your AI credits
 app.use("/chat", appAuth, chatRoute);
