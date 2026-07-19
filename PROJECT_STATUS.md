@@ -107,3 +107,16 @@ curl localhost:3000/health
   GET /tools/weather?lat&lng|city and /tools/news for the Today screen.
   (External APIs unreachable from the dev sandbox; verify once deployed.)
 - deps: + chrono-node.
+
+## Update — 19 July 2026 (5): Gmail + Calendar (read-only)
+- src/google/tokens.js — google_tokens table; serverAuthCode → refresh token
+  exchange (redirect_uri="" for mobile), access refresh w/ 60s slack, revoke on
+  disconnect; clear re-consent error when Google omits refresh_token.
+- src/google/api.js — recentEmails (primary, 3 days) + upcomingEvents + AI-text
+  renderers. src/google/routes.js at /google: connect/status/DELETE/inbox/
+  calendar (409 = not linked).
+- Intents: email + calendar queries → live data; unlinked → AI points to the
+  Connect button, never invents.
+- Prod env: GOOGLE_WEB_CLIENT_SECRET; enable Gmail + Calendar APIs and both
+  readonly scopes. Consent screen "Testing" = refresh tokens expire in 7 days;
+  publish/verify for production. Only unlinked-state testable in sandbox.

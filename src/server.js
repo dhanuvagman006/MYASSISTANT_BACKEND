@@ -49,6 +49,9 @@ app.use("/chat", appAuth, chatRoute);
 // Per-user memory management (list / add / forget) for the privacy screen.
 app.use("/memory", appAuth, require("./routes/memory"));
 
+// Google account link: Gmail + Calendar (read-only).
+app.use("/google", appAuth, require("./google/routes"));
+
 // Reminders (voice-created via /chat intents + Today screen CRUD).
 app.use("/reminders", appAuth, require("./reminders/routes"));
 

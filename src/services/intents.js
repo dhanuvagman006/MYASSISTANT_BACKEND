@@ -20,12 +20,16 @@ const weather = require("./tools/weather");
 const news = require("./tools/news");
 const reminders = require("../reminders/store");
 const memory = require("../memory/store");
+const gtokens = require("../google/tokens");
+const gapi = require("../google/api");
 
 const RE = {
   remindSet: /\b(remind me|set (a |an )?(reminder|alarm)|reminder (to|for)|don'?t let me forget)\b/i,
   remindList: /\b((what|list|show|any).{0,20}reminders?|my reminders)\b/i,
   weather: /\b(weather|temperature|forecast|rain(ing)?|hot|cold) (today|now|outside|tomorrow|in\b)|\bweather\b|\bforecast\b|\bumbrella\b/i,
   news: /\b(news|headlines?|what('| i)?s happening)\b/i,
+  email: /\b(email|emails|mail|inbox|gmail)\b/i,
+  calendar: /\b(calendar|meeting|meetings|appointments?|schedule|events?|agenda)\b/i,
   inCity: /\b(?:in|at|for) ([A-Za-z][A-Za-z .'-]{2,40})\s*\??$/i,
 };
 
@@ -114,6 +118,44 @@ async function buildToolContext({ userId, messages, tzOffsetMin = 330, lat, lng 
           blocks.push(
             "TOOL RESULT — LIVE " + d +
               " Answer the user's weather question from this real data only."
+          );
+        }
+      }
+
+      // ---- GMAIL ----
+      if (userId && RE.email.test(msg)) {
+        if (!gtokens.isConnected(userId)) {
+          blocks.push(
+            "TOOL RESULT — the user asked about email but has NOT connected " +
+              "their Gmail. Tell them to open the Today tab → Inbox and tap " +
+              "Connect Gmail; do not invent email contents."
+          );
+        } else {
+          const emails = await gapi.recentEmails(userId);
+          const d = gapi.describeEmails(emails);
+          blocks.push(
+            "TOOL RESULT — LIVE " +
+              (d || "Inbox: no recent primary emails.") +
+              "\nAnswer from this real data only; summarize the important ones for speech, never invent."
+          );
+        }
+      }
+
+      // ---- CALENDAR ----
+      if (userId && RE.calendar.test(msg) && !RE.remindSet.test(msg)) {
+        if (!gtokens.isConnected(userId)) {
+          blocks.push(
+            "TOOL RESULT — the user asked about their calendar but has NOT " +
+              "connected Google Calendar. Tell them to connect it from the " +
+              "Today tab → Inbox → Connect; do not invent events."
+          );
+        } else {
+          const events = await gapi.upcomingEvents(userId);
+          const d = gapi.describeEvents(events, tzOffsetMin);
+          blocks.push(
+            "TOOL RESULT — LIVE " +
+              (d || "Calendar: nothing scheduled in the next 7 days.") +
+              "\nAnswer from this real data only."
           );
         }
       }
