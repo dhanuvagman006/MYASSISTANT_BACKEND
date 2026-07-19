@@ -40,11 +40,16 @@ If there is nothing new to remember, reply exactly: []`;
  * @param {string} userMessage  last user turn
  * @param {string} assistantReply
  */
-async function extractAndSave(userId, userMessage, assistantReply) {
+async function extractAndSave(userId, userMessage, assistantReply, opts = {}) {
+  const saved = [];
   try {
-    if (!userMessage || userMessage.length < 8) return;
+    if (!userMessage || userMessage.length < 2) return saved;
     const now = Date.now();
-    if (now - (lastRun.get(userId) || 0) < EXTRACT_INTERVAL_MS) return;
+    // `force` is used by the sign-up interview, where several answers
+    // arrive seconds apart and every one of them matters.
+    if (!opts.force && now - (lastRun.get(userId) || 0) < EXTRACT_INTERVAL_MS) {
+      return saved;
+    }
     lastRun.set(userId, now);
 
     const known = store
@@ -70,24 +75,26 @@ async function extractAndSave(userId, userMessage, assistantReply) {
     const clean = reply.replace(/```json|```/g, "").trim();
     const start = clean.indexOf("[");
     const end = clean.lastIndexOf("]");
-    if (start === -1 || end === -1) return;
+    if (start === -1 || end === -1) return saved;
     const facts = JSON.parse(clean.slice(start, end + 1));
-    if (!Array.isArray(facts)) return;
+    if (!Array.isArray(facts)) return saved;
 
     for (const f of facts.slice(0, 4)) {
       if (f && typeof f === "object") {
-        store.remember(userId, {
+        const row = store.remember(userId, {
           key: f.key,
           value: f.value,
           category: f.category,
           source: "ai",
         });
+        if (row) saved.push(row);
       }
     }
   } catch (e) {
     // Memory learning is best-effort — a failure here must never surface.
     console.warn("memory extractor skipped:", e.message);
   }
+  return saved;
 }
 
 module.exports = { extractAndSave };

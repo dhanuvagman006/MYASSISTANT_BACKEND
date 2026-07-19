@@ -63,7 +63,9 @@ function createUser({ email, name, passwordHash = null, provider = "email", prov
   return findById(info.lastInsertRowid);
 }
 
-/** Find-or-create for social sign-in. Links by provider sub first, then email. */
+/** Find-or-create for social sign-in. Links by provider sub first, then email.
+ *  Returns { user, created } — `created` marks a brand-new account so the
+ *  app can run the sign-up interview exactly once. */
 function upsertSocialUser({ provider, sub, email, name }) {
   let user = findByProvider(provider, sub);
   if (user) {
@@ -71,7 +73,7 @@ function upsertSocialUser({ provider, sub, email, name }) {
       stmts.updateName.run(name, user.id);
       user = findById(user.id);
     }
-    return user;
+    return { user, created: false };
   }
   // Same email already registered (e.g. email signup first, Google later):
   // link the social identity to that account rather than duplicating it.
@@ -80,10 +82,10 @@ function upsertSocialUser({ provider, sub, email, name }) {
     if (existing) {
       db.prepare("UPDATE users SET provider_sub = COALESCE(provider_sub, ?) WHERE id = ?")
         .run(sub, existing.id);
-      return findById(existing.id);
+      return { user: findById(existing.id), created: false };
     }
   }
-  return createUser({ email, name, provider, providerSub: sub });
+  return { user: createUser({ email, name, provider, providerSub: sub }), created: true };
 }
 
 /** Shape sent to clients — never includes password_hash. */

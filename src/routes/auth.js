@@ -31,8 +31,9 @@ function issueSession(user) {
   return jwt.sign({ uid: user.id }, JWT_SECRET, { expiresIn: `${SESSION_DAYS}d` });
 }
 
-function respond(res, user) {
-  res.json({ token: issueSession(user), user: db.publicUser(user) });
+function respond(res, user, isNew = false) {
+  // isNew → the app shows the one-time sign-up interview.
+  res.json({ token: issueSession(user), user: db.publicUser(user), isNew });
 }
 
 const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
@@ -58,7 +59,7 @@ router.post("/signup", async (req, res) => {
   });
   // First memories: whatever the user gave us at sign-up.
   memory.seedProfile(user.id, { name: user.name, email: user.email });
-  respond(res, user);
+  respond(res, user, true);
 });
 
 router.post("/login", async (req, res) => {
@@ -82,7 +83,7 @@ router.post("/google", async (req, res) => {
       audience: process.env.GOOGLE_WEB_CLIENT_ID,
     });
     const p = ticket.getPayload();
-    const user = db.upsertSocialUser({
+    const { user, created } = db.upsertSocialUser({
       provider: "google",
       sub: p.sub,
       email: p.email,
@@ -98,7 +99,7 @@ router.post("/google", async (req, res) => {
       picture: p.picture,
       locale: p.locale,
     });
-    respond(res, user);
+    respond(res, user, created);
   } catch {
     res.status(401).json({ error: "invalid Google token" });
   }
@@ -114,7 +115,7 @@ router.post("/apple", async (req, res) => {
       issuer: "https://appleid.apple.com",
       audience: process.env.APPLE_BUNDLE_ID, // e.g. com.yourorg.myassistant
     });
-    const user = db.upsertSocialUser({
+    const { user, created } = db.upsertSocialUser({
       provider: "apple",
       sub: payload.sub,
       email: payload.email || null,
@@ -123,7 +124,7 @@ router.post("/apple", async (req, res) => {
       name: typeof name === "string" ? name.trim().slice(0, 100) : null,
     });
     memory.seedProfile(user.id, { name: user.name, email: user.email });
-    respond(res, user);
+    respond(res, user, created);
   } catch {
     res.status(401).json({ error: "invalid Apple token" });
   }

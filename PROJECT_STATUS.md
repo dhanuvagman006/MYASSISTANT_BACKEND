@@ -84,3 +84,10 @@ curl localhost:3000/health
   question (the app opens the mic; the answer flows through /chat so the
   extractor learns). ≥3 facts → weaves in one personal touch instead.
   AI failure → static fallback still personalized with the user's first name.
+
+## Update — 19 July 2026 (3): Interview support
+- Auth responses include `isNew` (signup true; Google/Apple via upsertSocialUser
+  now returning {user, created}; login false) → app shows one-time interview.
+- **POST /memory/interview {question, answer}** — extractor runs immediately
+  (`force` skips the 15s throttle, returns saved facts); raw-answer fallback
+  keyed by question when extraction yields nothing.
