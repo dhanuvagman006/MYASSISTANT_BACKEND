@@ -41,4 +41,43 @@ router.post("/", async (req, res) => {
   }
 });
 
+/**
+ * POST /chat/greeting — spoken greeting for app open / sign-in.
+ * Personalized from memory; if Hari barely knows the user yet, it asks
+ * ONE friendly question so the extractor can start learning about them.
+ */
+router.post("/greeting", async (req, res) => {
+  const userId = userIdOf(req);
+  const memoryBlock = userId ? buildMemoryPrompt(userId) : "";
+  const known = userId ? require("../memory/store").listMemories(userId) : [];
+  const learned = known.filter((m) => m.category !== "profile").length;
+
+  const directive =
+    learned < 3
+      ? "You know almost nothing about them yet, so after greeting, ask exactly ONE " +
+        "short, friendly question to get to know them — for example what they'd like " +
+        "to be called, which city they live in, or what they do. Just one question."
+      : "Weave in ONE personal touch from what you remember (their city, a preference, " +
+        "their work) so it feels like a friend who knows them. You may ask one light " +
+        "follow-up question about something you remember, or none.";
+
+  try {
+    const { reply } = await generateReply(
+      [{ role: "user", content: "(The user just opened the app and signed in. Greet them.)" }],
+      {
+        extraSystem:
+          memoryBlock +
+          "\n\nTASK: The user just opened the app. Greet them warmly by name if you " +
+          "know it, matching the time of day if unknown just be warm. Maximum two short " +
+          "spoken sentences. " + directive,
+      }
+    );
+    res.json({ greeting: reply || "Hi! I'm Hari. What should I call you?" });
+  } catch (e) {
+    // Never block the app on a greeting — fall back to a static one.
+    const name = req.user?.name ? `, ${String(req.user.name).split(" ")[0]}` : "";
+    res.json({ greeting: `Hi${name}! I'm Hari — how can I help you today?` });
+  }
+});
+
 module.exports = router;

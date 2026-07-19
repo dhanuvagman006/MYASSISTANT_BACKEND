@@ -77,3 +77,10 @@ curl localhost:3000/health
   name, given_name, email, photo, locale** from the verified ID token (refreshed
   every sign-in); Apple stores name+email.
 - Tested end-to-end: signup seeding ✓, upsert dedupe ✓, delete/clear ✓, prompt ✓.
+
+## Update — 19 July 2026 (2): Greeting endpoint
+- **POST /chat/greeting** (behind appAuth) — AI-generated spoken hello built from
+  the user's memory. <3 learned facts → greeting ends with ONE get-to-know-you
+  question (the app opens the mic; the answer flows through /chat so the
+  extractor learns). ≥3 facts → weaves in one personal touch instead.
+  AI failure → static fallback still personalized with the user's first name.
