@@ -1,5 +1,5 @@
 const router = require("express").Router();
-const { generateReply } = require("../services/ai/router");
+const { generateReply, generateReplyStream } = require("../services/ai/router");
 const { buildMemoryPrompt } = require("../memory/store");
 const { extractAndSave } = require("../memory/extractor");
 const { buildToolContext } = require("../services/intents");
@@ -70,6 +70,74 @@ router.post("/", async (req, res) => {
   } catch (e) {
     console.error("All providers failed:", e.message);
     res.status(502).json({ reply: "The assistant is unavailable right now. Please try again.", sources: [] });
+  }
+});
+
+/**
+ * POST /chat/stream — NDJSON streaming chat for the VOICE loop.
+ * Lines: {"d":"delta"}… then {"done":true,"sources":[…],"provider":…}.
+ * The app speaks each sentence the moment it completes, so the user
+ * hears the start of the answer while the rest is still generating.
+ * Falls back to the full non-streaming chain if Groq can't stream.
+ */
+router.post("/stream", async (req, res) => {
+  const { messages } = req.body || {};
+  if (!Array.isArray(messages) || messages.length === 0) {
+    return res.status(400).json({ error: "messages array required" });
+  }
+  const trimmed = messages.slice(-20).map((m) => ({
+    role: m.role === "assistant" ? "assistant" : "user",
+    content: String(m.content || "").slice(0, 8000),
+  }));
+  const userId = userIdOf(req);
+
+  let sources = [];
+  let full = "";
+  res.setHeader("Content-Type", "application/x-ndjson; charset=utf-8");
+  res.setHeader("Cache-Control", "no-cache");
+  res.setHeader("X-Accel-Buffering", "no"); // proxies must not buffer the stream
+  res.flushHeaders?.();
+  const send = (obj) => res.write(JSON.stringify(obj) + "\n");
+
+  try {
+    const ctx = await buildToolContext({
+      userId,
+      messages: trimmed,
+      tzOffsetMin: Number(req.get("X-TZ-Offset")) || 330,
+      lat: parseFloat(req.get("X-Geo-Lat")),
+      lng: parseFloat(req.get("X-Geo-Lng")),
+    });
+    sources = ctx.sources;
+    const extraSystem =
+      (userId ? buildMemoryPrompt(userId) : "") + ctx.block + styleDirective(req);
+
+    try {
+      for await (const d of generateReplyStream(trimmed, { extraSystem })) {
+        full += d;
+        send({ d });
+      }
+      send({ done: true, sources, provider: "groq" });
+    } catch (e) {
+      if (full) {
+        // Stream broke mid-answer: end cleanly with what was sent.
+        send({ done: true, sources, provider: "groq" });
+      } else {
+        // Groq couldn't start: full provider chain, sent as one delta.
+        const { reply, provider } = await generateReply(trimmed, { extraSystem });
+        full = reply || "";
+        send({ d: full });
+        send({ done: true, sources, provider });
+      }
+    }
+  } catch (e) {
+    console.error("stream chat failed:", e.message);
+    send({ error: "unavailable" });
+  }
+  res.end();
+
+  if (userId && full) {
+    const lastUser = [...trimmed].reverse().find((m) => m.role === "user");
+    if (lastUser) extractAndSave(userId, lastUser.content, full);
   }
 });
 

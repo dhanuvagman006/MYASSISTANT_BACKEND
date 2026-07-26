@@ -145,4 +145,63 @@ async function generateReply(messages, opts = {}) {
   throw new Error(`All providers failed: ${errors.join(" | ")}`);
 }
 
-module.exports = { generateReply };
+/**
+ * STREAMING (voice latency): yields text deltas from Groq as they are
+ * generated so the caller can start TTS on the first sentence while the
+ * rest is still being written — Gemini-Live-style time-to-first-audio.
+ * Throws before the first token if Groq is unavailable; the route then
+ * falls back to the non-streaming provider chain.
+ */
+async function* generateReplyStream(messages, opts = {}) {
+  const key = process.env.GROQ_API_KEY;
+  if (!key) throw new Error("groq: key missing");
+  const system = opts.system || SYSTEM_PROMPT + (opts.extraSystem || "");
+  const model = process.env.GROQ_MODEL || "llama-3.3-70b-versatile";
+
+  const r = await fetch("https://api.groq.com/openai/v1/chat/completions", {
+    method: "POST",
+    headers: {
+      "content-type": "application/json",
+      authorization: `Bearer ${key}`,
+    },
+    signal: AbortSignal.timeout(TIMEOUT_MS),
+    body: JSON.stringify({
+      model,
+      stream: true,
+      messages: [
+        { role: "system", content: system },
+        ...messages.map((m) => ({ role: m.role, content: m.content })),
+      ],
+      temperature: 0.6,
+      max_tokens: 1024,
+    }),
+  });
+  if (!r.ok || !r.body) throw new Error(`groq ${r.status}`);
+
+  const reader = r.body.getReader();
+  const dec = new TextDecoder();
+  let buf = "";
+  try {
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      buf += dec.decode(value, { stream: true });
+      let nl;
+      while ((nl = buf.indexOf("\n")) >= 0) {
+        const line = buf.slice(0, nl).trim();
+        buf = buf.slice(nl + 1);
+        if (!line.startsWith("data:")) continue;
+        const data = line.slice(5).trim();
+        if (data === "[DONE]") return;
+        try {
+          const delta = JSON.parse(data).choices?.[0]?.delta?.content;
+          if (delta) yield delta;
+        } catch (_) {}
+      }
+    }
+  } finally {
+    reader.releaseLock?.();
+  }
+}
+
+module.exports = { generateReply, generateReplyStream };
