@@ -82,6 +82,9 @@ app.get("/tools/news", appAuth, async (req, res) => {
 // Voice transcription (Whisper via Groq) — same auth as chat
 app.use("/stt", appAuth, sttRoute);
 
+// Group B — photos, documents, OCR, screenshot helper (Gemini vision).
+app.use("/vision", appAuth, require("./routes/vision"));
+
 // Regional language from the caller's IP (no app permissions needed)
 app.use("/region", regionRoute);
 
