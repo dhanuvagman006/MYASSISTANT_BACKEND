@@ -31,7 +31,7 @@ async function getHeadlines({ topic, lang = "en-IN", country = "IN", max = 6 } =
 
   // Titles look like "Headline text - Source Name". Skip the feed title.
   const items = [];
-  const re = /<item>[\s\S]*?<title>([\s\S]*?)<\/title>/g;
+  const re = /<item>[\s\S]*?<title>([\s\S]*?)<\/title>(?:[\s\S]*?<link>([\s\S]*?)<\/link>)?/g;
   let m;
   while ((m = re.exec(xml)) && items.length < 12) {
     const raw = decode(m[1].replace(/<!\[CDATA\[|\]\]>/g, "").trim());
@@ -39,6 +39,7 @@ async function getHeadlines({ topic, lang = "en-IN", country = "IN", max = 6 } =
     items.push({
       title: dash > 0 ? raw.slice(0, dash) : raw,
       source: dash > 0 ? raw.slice(dash + 3) : "",
+      link: m[2] ? decode(m[2].replace(/<!\[CDATA\[|\]\]>/g, "").trim()) : "",
     });
   }
   cache.set(url, { ts: Date.now(), data: items });

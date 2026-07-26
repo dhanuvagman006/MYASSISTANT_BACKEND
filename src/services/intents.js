@@ -70,6 +70,9 @@ async function buildToolContext({ userId, messages, tzOffsetMin = 330, lat, lng 
     `Current date and time for the user: ${local.toISOString().replace("T", " ").slice(0, 16)} ` +
       `(UTC${tzOffsetMin >= 0 ? "+" : ""}${(tzOffsetMin / 60).toFixed(1).replace(".0", "")}).`,
   ];
+  /** Sources shown in the app under the reply (A5). Filled by whichever
+   *  live tools actually ran — no extra network calls are ever made. */
+  const sources = [];
 
   if (msg) {
     try {
@@ -119,6 +122,7 @@ async function buildToolContext({ userId, messages, tzOffsetMin = 330, lat, lng 
             "TOOL RESULT — LIVE " + d +
               " Answer the user's weather question from this real data only."
           );
+          sources.push({ name: "Open-Meteo" + (w?.label ? ` · ${w.label}` : ""), url: "https://open-meteo.com" });
         }
       }
 
@@ -170,6 +174,13 @@ async function buildToolContext({ userId, messages, tzOffsetMin = 330, lat, lng 
             "TOOL RESULT — LIVE " + d +
               "\nSummarize the 3–4 most important ones conversationally for speech; do not read URLs."
           );
+          const seen = new Set();
+          for (const h of items) {
+            if (!h.source || seen.has(h.source)) continue;
+            seen.add(h.source);
+            sources.push({ name: h.source, url: h.link || "" });
+            if (sources.length >= 5) break;
+          }
         }
       }
     } catch (e) {
@@ -179,7 +190,7 @@ async function buildToolContext({ userId, messages, tzOffsetMin = 330, lat, lng 
     }
   }
 
-  return "\n\n" + blocks.join("\n\n");
+  return { block: "\n\n" + blocks.join("\n\n"), sources };
 }
 
 module.exports = { buildToolContext, parseReminder };

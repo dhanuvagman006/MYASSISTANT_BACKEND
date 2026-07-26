@@ -10,6 +10,25 @@ function userIdOf(req) {
   return Number.isInteger(id) && id > 0 ? id : null;
 }
 
+/** A4 — assistant style settings, sent by the app as headers. */
+const TONES = {
+  friendly: "Speak warmly and casually, like a close friend.",
+  professional: "Speak politely and precisely, with a professional tone.",
+  cheerful: "Be upbeat, positive and encouraging.",
+  calm: "Keep a calm, soothing, unhurried tone.",
+};
+const LENGTHS = {
+  short: "Keep every answer to ONE short spoken sentence unless more is essential.",
+  balanced: "", // the base prompt's 1–3 sentence default
+  detailed: "Give fuller answers of 4–6 spoken sentences when the topic benefits from detail.",
+};
+function styleDirective(req) {
+  const t = TONES[String(req.get("X-Style-Tone") || "").toLowerCase()];
+  const l = LENGTHS[String(req.get("X-Style-Length") || "").toLowerCase()];
+  if (!t && !l) return "";
+  return "\n\nUSER STYLE PREFERENCE: " + [t, l].filter(Boolean).join(" ");
+}
+
 router.post("/", async (req, res) => {
   const { messages } = req.body || {};
   if (!Array.isArray(messages) || messages.length === 0) {
@@ -28,16 +47,19 @@ router.post("/", async (req, res) => {
     // as an addition to the system prompt on every single reply.
     // Tools: intents (reminders/weather/news/clock) run first — they may
     // EXECUTE actions and inject live data the AI must answer from.
-    const toolBlock = await buildToolContext({
+    const { block: toolBlock, sources } = await buildToolContext({
       userId,
       messages: trimmed,
       tzOffsetMin: Number(req.get("X-TZ-Offset")) || 330,
       lat: parseFloat(req.get("X-Geo-Lat")),
       lng: parseFloat(req.get("X-Geo-Lng")),
     });
-    const extraSystem = (userId ? buildMemoryPrompt(userId) : "") + toolBlock;
+    // A4 — user-selected style rides on headers; a plain string concat,
+    // so personalization costs zero extra latency.
+    const extraSystem =
+      (userId ? buildMemoryPrompt(userId) : "") + toolBlock + styleDirective(req);
     const { reply, provider } = await generateReply(trimmed, { extraSystem });
-    res.json({ reply: reply || "Sorry, I couldn't answer that.", sources: [], provider });
+    res.json({ reply: reply || "Sorry, I couldn't answer that.", sources, provider });
 
     // Learning: AFTER the response is sent, quietly check whether this
     // exchange taught us something durable about the user. Never awaited.
