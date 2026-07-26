@@ -17,6 +17,8 @@
  */
 const chrono = require("chrono-node");
 const weather = require("./tools/weather");
+const places = require("./tools/places");
+const currency = require("./tools/currency");
 const news = require("./tools/news");
 const reminders = require("../reminders/store");
 const memory = require("../memory/store");
@@ -31,6 +33,10 @@ const RE = {
   email: /\b(email|emails|mail|inbox|gmail)\b/i,
   calendar: /\b(calendar|meeting|meetings|appointments?|schedule|events?|agenda)\b/i,
   inCity: /\b(?:in|at|for) ([A-Za-z][A-Za-z .'-]{2,40})\s*\??$/i,
+  briefing:
+    /\b(morning|daily) briefing\b|\bbrief(ing)? (me|my day|about my day)\b|\bstart my day\b|\bhow('| i)?s my day look/i,
+  nearby:
+    /\b(near ?(me|by|est)|nearby|closest|around here|walking distance)\b|\bnear my (place|home|location)\b/i,
 };
 
 /** "remind me to call amma tomorrow at 5" → { text, dueAt } */
@@ -162,6 +168,81 @@ async function buildToolContext({ userId, messages, tzOffsetMin = 330, lat, lng 
               "\nAnswer from this real data only."
           );
         }
+      }
+
+      // ---- NEARBY PLACES (C3) ----
+      if (RE.nearby.test(msg)) {
+        try {
+          const list = await places.searchPlaces({ q: msg.slice(0, 120), lat, lng });
+          const d = places.describePlaces(list);
+          blocks.push(
+            "TOOL RESULT — LIVE nearby places (sorted by distance):\n" +
+              (d || "(nothing found nearby)") +
+              "\nRecommend the best 2-3 conversationally for speech. Mention the Today tab's Nearby section for call and directions buttons."
+          );
+          if (d) sources.push({ name: "Nearby search", url: "" });
+        } catch (_) {}
+      }
+
+      // ---- CURRENCY (C4) ----
+      {
+        const ask = currency.parseCurrencyAsk(msg);
+        if (ask) {
+          try {
+            const rate = await currency.getRate(ask.from, ask.to);
+            const converted = Math.round(ask.amount * rate * 100) / 100;
+            blocks.push(
+              `TOOL RESULT — LIVE exchange rate: 1 ${ask.from} = ${rate} ${ask.to}. ` +
+                `So ${ask.amount} ${ask.from} = ${converted} ${ask.to}. ` +
+                "Answer from this real rate only."
+            );
+            sources.push({ name: "Frankfurter (ECB rates)", url: "https://www.frankfurter.app" });
+          } catch (_) {}
+        }
+      }
+
+      // ---- MORNING BRIEFING (C2): weather + reminders + calendar + news in ONE reply ----
+      if (RE.briefing.test(msg)) {
+        const parts = [];
+        try {
+          const w = await weather.getWeather({ lat, lng });
+          const d = weather.describe(w);
+          if (d) {
+            parts.push("WEATHER: " + d);
+            sources.push({ name: "Open-Meteo", url: "https://open-meteo.com" });
+          }
+        } catch (_) {}
+        if (userId) {
+          const listing = reminders.upcomingText(userId);
+          parts.push("PENDING REMINDERS: " + (listing || "(none)"));
+          if (gtokens.isConnected(userId)) {
+            try {
+              const ev = await gapi.upcomingEvents(userId, { days: 1 });
+              const d = gapi.describeEvents(ev, tzOffsetMin);
+              if (d) parts.push("TODAY'S CALENDAR: " + d);
+            } catch (_) {}
+          }
+        }
+        try {
+          const items = await news.getHeadlines();
+          if (items?.length) {
+            parts.push(
+              "HEADLINES: " + items.slice(0, 4).map((h) => h.title).join(" | ")
+            );
+            const seen = new Set();
+            for (const h of items.slice(0, 4)) {
+              if (h.source && !seen.has(h.source)) {
+                seen.add(h.source);
+                sources.push({ name: h.source, url: h.link || "" });
+              }
+            }
+          }
+        } catch (_) {}
+        blocks.push(
+          "TOOL RESULT — LIVE data for the user's DAILY BRIEFING:\n" +
+            parts.join("\n") +
+            "\nCompose a warm spoken briefing in the user's language: a short greeting, the weather in one line, today's calendar and pending reminders (skip gracefully if empty), then 2-3 headlines. Keep it under 30 seconds of speech; do not read URLs."
+        );
       }
 
       // ---- NEWS ----

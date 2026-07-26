@@ -85,6 +85,9 @@ app.use("/stt", appAuth, sttRoute);
 // Group B — photos, documents, OCR, screenshot helper (Gemini vision).
 app.use("/vision", appAuth, require("./routes/vision"));
 
+// Group C — nearby places search (ratings, distance, call & directions).
+app.use("/places", appAuth, require("./routes/places"));
+
 // Regional language from the caller's IP (no app permissions needed)
 app.use("/region", regionRoute);
 
