@@ -131,3 +131,28 @@ curl localhost:3000/health
   Sarvam failure/empty (also covers non-Indian languages). Response now
   includes provider. Either key alone works; no key → 503.
 - Get a key at dashboard.sarvam.ai (free tier) → set SARVAM_API_KEY.
+
+## Swiggy food ordering (added 27 Jul 2026)
+Voice ordering via **Swiggy Builders Club MCP** (mcp.swiggy.com/builders).
+- `src/swiggy/tokens.js` — per-user OAuth 2.1 + PKCE with Dynamic Client
+  Registration and discovery (no client id to configure); refresh-token
+  rotation handled; tokens in SQLite `swiggy_tokens`.
+- `src/swiggy/mcp.js` — dependency-free Streamable-HTTP MCP client
+  (per-user session cache, auto re-init on 404, token refresh on 401,
+  SSE + JSON framing).
+- `src/swiggy/order.js` — deterministic 2-turn flow: craving → address →
+  OPEN restaurants → best-rated matching item (top-3 menus fetched in
+  parallel) → cart → **spoken confirmation (2-min TTL)** → COD order →
+  ETA. Guard rails: ₹1000 cap, place_food_order is NOT idempotent so a
+  5xx checks get_food_orders before reporting failure.
+- Intent wiring in `src/services/intents.js` — "order a pizza" / "I'm
+  hungry" etc. trigger the flow; a bare "yes/no" (multilingual: haan,
+  houdu, nahi, beda…) resolves a pending confirmation FIRST, before all
+  other intents. All money moves in code; the AI only phrases results.
+- Routes: `GET /swiggy/status`, `GET /swiggy/connect` (returns browser
+  URL for phone+OTP), public `GET /swiggy/callback`, `DELETE /swiggy`.
+- Env: `SWIGGY_MCP_BASE`, `SWIGGY_REDIRECT_URI` (see .env.example).
+- E2E-tested against a local mock MCP server (search→cart→confirm→place,
+  cancel path, closed-restaurant filtering all pass).
+- TODO: app needs a "Connect Swiggy" button (call /swiggy/connect, open
+  the URL); apply for Builders Club production access with a demo video.

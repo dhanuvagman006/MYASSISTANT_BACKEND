@@ -24,6 +24,8 @@ const reminders = require("../reminders/store");
 const memory = require("../memory/store");
 const gtokens = require("../google/tokens");
 const gapi = require("../google/api");
+const swiggyTokens = require("../swiggy/tokens");
+const food = require("../swiggy/order");
 
 const RE = {
   remindSet: /\b(remind me|set (a |an )?(reminder|alarm)|reminder (to|for)|don'?t let me forget)\b/i,
@@ -37,7 +39,24 @@ const RE = {
     /\b(morning|daily) briefing\b|\bbrief(ing)? (me|my day|about my day)\b|\bstart my day\b|\bhow('| i)?s my day look/i,
   nearby:
     /\b(near ?(me|by|est)|nearby|closest|around here|walking distance)\b|\bnear my (place|home|location)\b/i,
+  foodOrder:
+    /\b(order|get|bring|deliver|book)\b.{0,40}\b(food|pizza|biryani|burger|dosa|idli|noodles|momos|thali|shawarma|rolls?|sandwich|cake|ice ?cream|meals?|dinner|lunch|breakfast|snacks?)\b|\bswiggy\b.{0,30}\border\b|\border\b.{0,30}\bswiggy\b|\bi('| a)?m (really |so |very )?hungry\b/i,
+  yes: /^\s*(yes|yeah|yep|ya|sure|ok(ay)?|confirm|place (it|the order)|go ahead|do it|haan|ho|houdu|sari|ஆமாம்|హా|हाँ|ಹೌದು)[.! ]*$/i,
+  no: /^\s*(no|nope|nah|cancel|don'?t|stop|leave it|beda|nako|nahi|नहीं|ಬೇಡ|வேண்டாம்|వద్దు)[.! ]*$/i,
 };
+
+/** "order a large veg pizza from swiggy please" → "large veg pizza" */
+function extractCraving(msg) {
+  let s = norm(msg)
+    .replace(/\b(hey|hi|ok(ay)?|please|pls|can you|could you|will you|for me|right now|now|today|tonight|on|from|via|using|swiggy)\b/g, " ")
+    .replace(/\b(order|get|bring|deliver|book|buy|want|need|i|am|is|a|an|some|the|my|me)\b/g, " ")
+    .replace(/[^\p{L}\p{N} ]/gu, " ")
+    .replace(/\s{2,}/g, " ")
+    .trim();
+  if (!s || /^hungry$/.test(s)) s = "food";
+  return s.slice(0, 60);
+}
+const norm = (s) => String(s || "").toLowerCase();
 
 /** "remind me to call amma tomorrow at 5" → { text, dueAt } */
 function parseReminder(msg, now, tzOffsetMin) {
@@ -82,6 +101,41 @@ async function buildToolContext({ userId, messages, tzOffsetMin = 330, lat, lng 
 
   if (msg) {
     try {
+      // ---- FOOD ORDER (Swiggy MCP) — checked FIRST because a bare
+      // "yes"/"no" is meaningless to every other intent. Real money:
+      // the flow is deterministic and two-turn; the AI only phrases it. ----
+      if (userId && food.hasPending(userId) && (RE.yes.test(msg) || RE.no.test(msg))) {
+        const r = RE.yes.test(msg)
+          ? await food.confirmPending(userId)
+          : await food.cancelPending(userId);
+        blocks.push("TOOL RESULT — SWIGGY: " + r.say);
+        sources.push({ name: "Swiggy", url: "https://www.swiggy.com" });
+        return { block: "\n\n" + blocks.join("\n\n"), sources };
+      }
+      if (userId && RE.foodOrder.test(msg)) {
+        if (!swiggyTokens.isLinked(userId)) {
+          blocks.push(
+            "TOOL RESULT — SWIGGY: the user asked to order food but has NOT " +
+              "linked their Swiggy account. Tell them to open the You tab and " +
+              "tap Connect Swiggy, then ask again. Do not pretend to order."
+          );
+        } else {
+          try {
+            const r = await food.prepareOrder(userId, extractCraving(msg));
+            blocks.push("TOOL RESULT — SWIGGY: " + r.say);
+            sources.push({ name: "Swiggy", url: "https://www.swiggy.com" });
+          } catch (e) {
+            console.error("swiggy prepare failed:", e.message);
+            blocks.push(
+              "TOOL RESULT — SWIGGY: ordering failed (" +
+                (e.code === "NOT_LINKED" ? "account link expired — ask them to reconnect Swiggy in the You tab" : "service unavailable") +
+                "). NO order was placed and NO cart exists. Apologize briefly; never claim an order happened."
+            );
+          }
+        }
+        return { block: "\n\n" + blocks.join("\n\n"), sources };
+      }
+
       // ---- REMINDER: CREATE (deterministic side effect) ----
       if (userId && RE.remindSet.test(msg)) {
         const { text, dueAt } = parseReminder(msg, now, tzOffsetMin);

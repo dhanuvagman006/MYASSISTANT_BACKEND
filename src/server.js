@@ -52,6 +52,16 @@ app.use("/memory", appAuth, require("./routes/memory"));
 // Google account link: Gmail + Calendar (read-only).
 app.use("/google", appAuth, require("./google/routes"));
 
+// Swiggy account link (Builders Club MCP food ordering).
+// The OAuth callback is reached by a BROWSER redirect (no app JWT), so it
+// is mounted before the auth guard; identity rides on the signed state.
+const swiggyRoutes = require("./swiggy/routes");
+app.use(
+  "/swiggy",
+  (req, res, next) => (req.path === "/callback" ? next() : appAuth(req, res, next)),
+  swiggyRoutes
+);
+
 // Reminders (voice-created via /chat intents + Today screen CRUD).
 app.use("/reminders", appAuth, require("./reminders/routes"));
 
