@@ -22,6 +22,7 @@ const currency = require("./tools/currency");
 const news = require("./tools/news");
 const reminders = require("../reminders/store");
 const memory = require("../memory/store");
+const docsStore = require("../docs/store");
 const gtokens = require("../google/tokens");
 const gapi = require("../google/api");
 const swiggyTokens = require("../swiggy/tokens");
@@ -39,6 +40,8 @@ const RE = {
     /\b(morning|daily) briefing\b|\bbrief(ing)? (me|my day|about my day)\b|\bstart my day\b|\bhow('| i)?s my day look/i,
   nearby:
     /\b(near ?(me|by|est)|nearby|closest|around here|walking distance)\b|\bnear my (place|home|location)\b/i,
+  docRecall:
+    /\b(reports?|documents?|prescriptions?|receipts?|records?|scan|photocopy|test results?|x-?rays?|lab (results?|reports?)|medical (file|history)|bill|invoice)\b|\b(doctor|hospital|clinic)\b.{0,40}\b(said|told|suggested|suggestions?|advice|advised|gave|prescribed|recommend\w*)\b|\b(said|told|suggested|suggestions?|advice|advised|gave|prescribed|recommend\w*)\b.{0,40}\b(doctor|hospital|clinic)\b/i,
   foodOrder:
     /\b(order|get|bring|deliver|book)\b.{0,40}\b(food|pizza|biryani|burger|dosa|idli|noodles|momos|thali|shawarma|rolls?|sandwich|cake|ice ?cream|meals?|dinner|lunch|breakfast|snacks?)\b|\bswiggy\b.{0,30}\border\b|\border\b.{0,30}\bswiggy\b|\bi('| a)?m (really |so |very )?hungry\b/i,
   yes: /^\s*(yes|yeah|yep|ya|sure|ok(ay)?|confirm|place (it|the order)|go ahead|do it|haan|ho|houdu|sari|ஆமாம்|హా|हाँ|ಹೌದು)[.! ]*$/i,
@@ -98,6 +101,9 @@ async function buildToolContext({ userId, messages, tzOffsetMin = 330, lat, lng 
   /** Sources shown in the app under the reply (A5). Filled by whichever
    *  live tools actually ran — no extra network calls are ever made. */
   const sources = [];
+  /** Saved documents matched by this turn — the app pops them up on screen
+   *  while the reply is spoken (voice-to-voice recall). */
+  const documents = [];
 
   if (msg) {
     try {
@@ -110,7 +116,7 @@ async function buildToolContext({ userId, messages, tzOffsetMin = 330, lat, lng 
           : await food.cancelPending(userId);
         blocks.push("TOOL RESULT — SWIGGY: " + r.say);
         sources.push({ name: "Swiggy", url: "https://www.swiggy.com" });
-        return { block: "\n\n" + blocks.join("\n\n"), sources };
+        return { block: "\n\n" + blocks.join("\n\n"), sources, documents };
       }
       if (userId && RE.foodOrder.test(msg)) {
         if (!swiggyTokens.isLinked(userId)) {
@@ -133,7 +139,7 @@ async function buildToolContext({ userId, messages, tzOffsetMin = 330, lat, lng 
             );
           }
         }
-        return { block: "\n\n" + blocks.join("\n\n"), sources };
+        return { block: "\n\n" + blocks.join("\n\n"), sources, documents };
       }
 
       // ---- REMINDER: CREATE (deterministic side effect) ----
@@ -220,6 +226,35 @@ async function buildToolContext({ userId, messages, tzOffsetMin = 330, lat, lng 
             "TOOL RESULT — LIVE " +
               (d || "Calendar: nothing scheduled in the next 7 days.") +
               "\nAnswer from this real data only."
+          );
+        }
+      }
+
+      // ---- SAVED DOCUMENTS RECALL ("show me the report from my last
+      // hospital visit") — pure FTS lookup, zero extra AI/network calls. ----
+      if (userId && RE.docRecall.test(msg)) {
+        const hits = docsStore.searchDocuments(userId, msg, 3);
+        if (hits.length) {
+          for (const d of hits) documents.push(docsStore.toClient(d));
+          const lines = hits.map((d, i) =>
+            `${i + 1}. "${d.title || d.filename}"` +
+            (d.doc_date ? ` dated ${d.doc_date}` : "") +
+            (d.summary ? ` — ${d.summary}` : "") +
+            (d.note ? `\n   USER'S OWN NOTE (e.g. what the doctor said): ${d.note}` : "")
+          );
+          blocks.push(
+            "TOOL RESULT — MATCHING SAVED DOCUMENTS (they are being SHOWN on the user's screen right now):\n" +
+              lines.join("\n") +
+              "\nTell the user you've pulled the document(s) up on screen, then answer their question FROM this data. " +
+              "If they asked what the doctor said or suggested, recite the USER'S OWN NOTE and the actionable points " +
+              "(medicines, dosages, follow-up dates) in natural speech. Never invent details that are not above."
+          );
+          sources.push({ name: "Your saved documents", url: "" });
+        } else {
+          blocks.push(
+            "TOOL RESULT — DOCUMENT SEARCH: the user seems to be asking about a saved document, but nothing matching " +
+              "was found in their saved documents. Say so briefly and remind them they can save reports and receipts " +
+              "from the Documents screen so you can recall them later."
           );
         }
       }
@@ -325,7 +360,7 @@ async function buildToolContext({ userId, messages, tzOffsetMin = 330, lat, lng 
     }
   }
 
-  return { block: "\n\n" + blocks.join("\n\n"), sources };
+  return { block: "\n\n" + blocks.join("\n\n"), sources, documents };
 }
 
 module.exports = { buildToolContext, parseReminder };

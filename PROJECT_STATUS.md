@@ -24,6 +24,19 @@ API server for the MYASSISTANT ("Hari") Flutter app. Endpoints:
 5. **Voice-friendly system prompt** — replies must match the user's language AND script,
    stay 1–3 spoken sentences, and contain no markdown/emoji/URLs (they are read by TTS).
 
+6. **DOCUMENT MEMORY (client feature)** — the agent now remembers documents:
+   - `POST /docs` (multipart file + optional user note, e.g. "doctor said take
+     Metformin 500mg…") → file saved to `DATA_DIR/files/<uid>/`, ONE Gemini call
+     extracts title/category/date/summary/tags, a context fact lands in /memory.
+   - `GET /docs`, `GET /docs/:id/file`, `PATCH /docs/:id` (note), `DELETE /docs/:id`.
+   - Recall is wired into the chat intent layer (`RE.docRecall` in intents.js):
+     "show me the report of my last hospital visit" → SQLite **FTS5** BM25 search
+     (zero extra AI calls at recall time), matched docs are injected into the
+     system prompt (the AI recites the doctor's note) AND returned as a
+     `documents` array on `/chat` and in the `done` line of `/chat/stream`,
+     so the app pops the actual file up on screen during voice-to-voice.
+   - Caps: 100 docs/user (oldest evicted, file deleted from disk too).
+
 Last commit at time of writing: `3f51e39` on `main`.
 
 ## Environment (.env — never committed)

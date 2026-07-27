@@ -95,6 +95,10 @@ app.use("/stt", appAuth, sttRoute);
 // Group B — photos, documents, OCR, screenshot helper (Gemini vision).
 app.use("/vision", appAuth, require("./routes/vision"));
 
+// Group B+ — SAVED documents: hospital reports, receipts… Hari remembers
+// them and pulls them back up from a voice request (see routes/docs.js).
+app.use("/docs", appAuth, require("./routes/docs"));
+
 // Group C — nearby places search (ratings, distance, call & directions).
 app.use("/places", appAuth, require("./routes/places"));
 

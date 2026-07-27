@@ -102,6 +102,15 @@ function deleteMemory(userId, id) {
   return stmts.delete.run(userId, id).changes > 0;
 }
 
+/** Remove a memory by its key (used when a linked document is deleted). */
+function deleteByKey(userId, key) {
+  return (
+    db
+      .prepare("DELETE FROM memories WHERE user_id = ? AND key = ?")
+      .run(userId, slugKey(key)).changes > 0
+  );
+}
+
 function clearMemories(userId) {
   return stmts.clear.run(userId).changes;
 }
@@ -155,6 +164,7 @@ function buildMemoryPrompt(userId, { budget = 2200 } = {}) {
 
 module.exports = {
   remember,
+  deleteByKey,
   listMemories,
   deleteMemory,
   clearMemories,

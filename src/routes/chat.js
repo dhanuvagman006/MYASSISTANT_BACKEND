@@ -47,7 +47,7 @@ router.post("/", async (req, res) => {
     // as an addition to the system prompt on every single reply.
     // Tools: intents (reminders/weather/news/clock) run first — they may
     // EXECUTE actions and inject live data the AI must answer from.
-    const { block: toolBlock, sources } = await buildToolContext({
+    const toolCtx = await buildToolContext({
       userId,
       messages: trimmed,
       tzOffsetMin: Number(req.get("X-TZ-Offset")) || 330,
@@ -57,9 +57,14 @@ router.post("/", async (req, res) => {
     // A4 — user-selected style rides on headers; a plain string concat,
     // so personalization costs zero extra latency.
     const extraSystem =
-      (userId ? buildMemoryPrompt(userId) : "") + toolBlock + styleDirective(req);
+      (userId ? buildMemoryPrompt(userId) : "") + toolCtx.block + styleDirective(req);
     const { reply, provider } = await generateReply(trimmed, { extraSystem });
-    res.json({ reply: reply || "Sorry, I couldn't answer that.", sources, provider });
+    res.json({
+      reply: reply || "Sorry, I couldn't answer that.",
+      sources: toolCtx.sources,
+      documents: toolCtx.documents || [],
+      provider,
+    });
 
     // Learning: AFTER the response is sent, quietly check whether this
     // exchange taught us something durable about the user. Never awaited.
@@ -92,6 +97,7 @@ router.post("/stream", async (req, res) => {
   const userId = userIdOf(req);
 
   let sources = [];
+  let documents = [];
   let full = "";
   res.setHeader("Content-Type", "application/x-ndjson; charset=utf-8");
   res.setHeader("Cache-Control", "no-cache");
@@ -108,6 +114,7 @@ router.post("/stream", async (req, res) => {
       lng: parseFloat(req.get("X-Geo-Lng")),
     });
     sources = ctx.sources;
+    documents = ctx.documents || [];
     const extraSystem =
       (userId ? buildMemoryPrompt(userId) : "") + ctx.block + styleDirective(req);
 
@@ -116,17 +123,17 @@ router.post("/stream", async (req, res) => {
         full += d;
         send({ d });
       }
-      send({ done: true, sources, provider: "groq" });
+      send({ done: true, sources, documents, provider: "groq" });
     } catch (e) {
       if (full) {
         // Stream broke mid-answer: end cleanly with what was sent.
-        send({ done: true, sources, provider: "groq" });
+        send({ done: true, sources, documents, provider: "groq" });
       } else {
         // Groq couldn't start: full provider chain, sent as one delta.
         const { reply, provider } = await generateReply(trimmed, { extraSystem });
         full = reply || "";
         send({ d: full });
-        send({ done: true, sources, provider });
+        send({ done: true, sources, documents, provider });
       }
     }
   } catch (e) {
