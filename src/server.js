@@ -118,4 +118,13 @@ app.use((err, _req, res, _next) => {
 });
 
 const port = process.env.PORT || 3000;
-app.listen(port, () => console.log(`MYASSISTANT backend on :${port}`));
+app.listen(port, () => {
+  console.log(`MYASSISTANT backend on :${port}`);
+  if (!process.env.GEMINI_API_KEY) {
+    console.warn(
+      "WARNING: GEMINI_API_KEY not set — /vision and /docs analysis " +
+        "(Group B: photos, PDFs, OCR, screenshots) will return 503. " +
+        "Chat still works if GROQ_API_KEY is set."
+    );
+  }
+});

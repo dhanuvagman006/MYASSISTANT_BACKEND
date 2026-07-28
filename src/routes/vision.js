@@ -44,7 +44,20 @@ Look at the image and reply with STRICT JSON only (no markdown fences):
 Set "action" ONLY when the image clearly shows an event with a date (poster, invitation, ticket, booking, meeting screenshot). Resolve relative dates ("this Saturday") using the current date-time. If the year is missing assume the next future occurrence. No event → "action": null.`,
 };
 
-router.post("/", upload.single("file"), async (req, res) => {
+// Multer as an explicit step so its errors (e.g. LIMIT_FILE_SIZE) become
+// clean JSON the app can show, instead of falling through to the generic
+// 500 handler.
+const receiveFile = (req, res, next) =>
+  upload.single("file")(req, res, (err) => {
+    if (!err) return next();
+    if (err.code === "LIMIT_FILE_SIZE") {
+      return res.status(413).json({ error: "file too large (max 18 MB)" });
+    }
+    console.error("vision upload:", err.message);
+    return res.status(400).json({ error: "bad upload" });
+  });
+
+router.post("/", receiveFile, async (req, res) => {
   try {
     const f = req.file;
     if (!f || !f.buffer?.length) {
@@ -54,7 +67,13 @@ router.post("/", upload.single("file"), async (req, res) => {
       return res.status(415).json({ error: `unsupported type ${f.mimetype}` });
     }
     const key = process.env.GEMINI_API_KEY;
-    if (!key) return res.status(503).json({ error: "vision unavailable" });
+    if (!key) {
+      // Chat can run on Groq alone, but vision NEEDS Gemini — make the
+      // misconfiguration loud in the logs so it isn't mistaken for a
+      // client-side network problem.
+      console.error("vision: GEMINI_API_KEY is not set — /vision disabled");
+      return res.status(503).json({ error: "vision not configured" });
+    }
 
     const mode = ["ask", "ocr", "screenshot"].includes(req.body.mode)
       ? req.body.mode
@@ -120,7 +139,15 @@ router.post("/", upload.single("file"), async (req, res) => {
       }
     );
     if (!r.ok) {
-      console.error("vision gemini", r.status);
+      // Gemini's body says WHY (invalid key, unknown model, quota…) — the
+      // status alone (400/403/429) is not enough to fix anything.
+      const detail = (await r.text().catch(() => "")).slice(0, 500);
+      console.error("vision gemini", r.status, detail);
+      if (r.status === 429) {
+        return res
+          .status(429)
+          .json({ error: "AI is busy right now — try again in a moment" });
+      }
       return res.status(502).json({ error: "vision failed" });
     }
     const data = await r.json();
