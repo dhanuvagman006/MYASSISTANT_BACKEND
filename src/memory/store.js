@@ -135,7 +135,7 @@ function seedProfile(userId, { name, givenName, email, picture, locale } = {}) {
  * Kept compact: category-grouped one-liners, hard character budget so a
  * memory-heavy user can never blow up the context window.
  */
-function buildMemoryPrompt(userId, { budget = 2200 } = {}) {
+function buildMemoryPrompt(userId, { budget = 2200, excludeDocFacts = false } = {}) {
   const rows = listMemories(userId);
   if (rows.length === 0) return "";
 
@@ -144,6 +144,10 @@ function buildMemoryPrompt(userId, { budget = 2200 } = {}) {
   for (const cat of order) {
     for (const r of rows.filter((x) => x.category === cat)) {
       if (r.key === "profile_picture") continue; // URL — useless to the model
+      // When document search already injected full doc data this turn,
+      // the doc_* facts are pure duplication — the model would read the
+      // same receipt twice.
+      if (excludeDocFacts && r.key.startsWith("doc_")) continue;
       lines.push(`- (${cat}) ${r.key.replace(/_/g, " ")}: ${r.value}`);
     }
   }

@@ -57,7 +57,13 @@ router.post("/", async (req, res) => {
     // A4 — user-selected style rides on headers; a plain string concat,
     // so personalization costs zero extra latency.
     const extraSystem =
-      (userId ? buildMemoryPrompt(userId) : "") + toolCtx.block + styleDirective(req);
+      (userId
+        ? buildMemoryPrompt(userId, {
+            excludeDocFacts: (toolCtx.documents || []).length > 0,
+          })
+        : "") +
+      toolCtx.block +
+      styleDirective(req);
     const { reply, provider } = await generateReply(trimmed, { extraSystem });
     res.json({
       reply: reply || "Sorry, I couldn't answer that.",

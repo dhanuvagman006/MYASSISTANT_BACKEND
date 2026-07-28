@@ -208,6 +208,25 @@ function searchDocuments(userId, message, limit = 3) {
   return rows;
 }
 
+/** Human title when AI analysis hasn't landed (or failed): guess the kind
+ *  from the user's own words + the save date — NEVER the raw filename
+ *  ("voice_save_1785246909049.jpg" must not be shown or spoken). */
+function fallbackTitle(d) {
+  const m = /receipt|bill|invoice|prescription|report|warranty|ticket|statement/i
+    .exec(d.note || "");
+  const kind = m
+    ? m[0][0].toUpperCase() + m[0].slice(1).toLowerCase()
+    : d.mime === "application/pdf"
+      ? "Document"
+      : "Photo";
+  const date = new Date(d.created_at).toLocaleDateString("en-IN", {
+    day: "numeric",
+    month: "short",
+    year: "numeric",
+  });
+  return `${kind} · ${date}`;
+}
+
 /** Compact public shape sent to the app (never the disk path). */
 function toClient(d) {
   return {
@@ -215,7 +234,7 @@ function toClient(d) {
     filename: d.filename,
     mime: d.mime,
     size: d.size,
-    title: d.title || d.filename,
+    title: d.title || fallbackTitle(d),
     category: d.category,
     docDate: d.doc_date,
     summary: d.summary,
@@ -234,5 +253,6 @@ module.exports = {
   deleteDocument,
   searchDocuments,
   toClient,
+  fallbackTitle,
   MAX_PER_USER,
 };

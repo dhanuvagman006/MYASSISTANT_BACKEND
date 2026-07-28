@@ -237,17 +237,20 @@ async function buildToolContext({ userId, messages, tzOffsetMin = 330, lat, lng 
         if (hits.length) {
           for (const d of hits) documents.push(docsStore.toClient(d));
           const lines = hits.map((d, i) =>
-            `${i + 1}. "${d.title || d.filename}"` +
+            `${i + 1}. "${d.title || docsStore.fallbackTitle(d)}"` +
             (d.doc_date ? ` dated ${d.doc_date}` : "") +
             (d.summary ? ` — ${d.summary}` : "") +
-            (d.note ? `\n   USER'S OWN NOTE (e.g. what the doctor said): ${d.note}` : "")
+            (d.note ? `\n   USER'S OWN NOTE (their words at save time): ${d.note}` : "")
           );
           blocks.push(
             "TOOL RESULT — MATCHING SAVED DOCUMENTS (they are being SHOWN on the user's screen right now):\n" +
               lines.join("\n") +
-              "\nTell the user you've pulled the document(s) up on screen, then answer their question FROM this data. " +
-              "If they asked what the doctor said or suggested, recite the USER'S OWN NOTE and the actionable points " +
-              "(medicines, dosages, follow-up dates) in natural speech. Never invent details that are not above."
+              "\nBriefly confirm it's on their screen, then answer their question FROM this data — " +
+              "ONCE, in 1-3 sentences. NEVER repeat the same information twice in your reply. " +
+              "NEVER say a file name aloud (no .jpg/.pdf names) — refer to it by its title or just 'this receipt/report'. " +
+              "Include the USER'S OWN NOTE only when they asked what was said/suggested/advised, " +
+              "or when it directly answers the question — otherwise skip it. " +
+              "Never invent details that are not above."
           );
           sources.push({ name: "Your saved documents", url: "" });
         } else {

@@ -63,7 +63,10 @@ router.post("/", upload.single("file"), async (req, res) => {
     const when = meta.docDate || new Date().toISOString().slice(0, 10);
     memory.remember(id, {
       key: `doc_${row.id}`,
-      value: `Saved document "${row.title}" dated ${when}${row.note ? ` — user's note: ${row.note.slice(0, 200)}` : ""}`,
+      // Title + date ONLY. The note/summary live on the document row and
+      // are injected by doc search when relevant — duplicating them here
+      // made the AI read the same content twice in recall answers.
+      value: `Saved a ${row.category || "document"}: "${row.title}" dated ${when}`,
       category: "context",
       source: "ai",
     });
