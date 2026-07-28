@@ -117,7 +117,7 @@ function extOf(mime, filename) {
  *  still works if analysis fails. AI refines it later via setMetadata. */
 function guessCategory(note) {
   const n = String(note || "").toLowerCase();
-  if (/receipt|reciept|ರಸೀದಿ|रसीद|രസീത|ரசீது|రసీదు/.test(n)) return "receipt";
+  if (/receipt|reciept|recipe|ರಸೀದಿ|रसीद|രസീത|ரசீது|రసీదు/.test(n)) return "receipt";
   if (/\bbill\b|invoice|ಬಿಲ್|बिल|பில்|బిల/.test(n)) return "bill";
   if (/prescription|पर्च/.test(n)) return "prescription";
   if (/report|test|lab|scan|x-?ray|medical/.test(n)) return "medical";
@@ -236,13 +236,17 @@ function searchDocuments(userId, message, limit = 3) {
  *  from the user's own words + the save date — NEVER the raw filename
  *  ("voice_save_1785246909049.jpg" must not be shown or spoken). */
 function fallbackTitle(d) {
-  const m = /receipt|bill|invoice|prescription|report|warranty|ticket|statement/i
+  const m = /receipt|reciept|recipe|bill|invoice|prescription|report|warranty|ticket|statement/i
     .exec(d.note || "");
-  const kind = m
-    ? m[0][0].toUpperCase() + m[0].slice(1).toLowerCase()
-    : d.mime === "application/pdf"
-      ? "Document"
-      : "Photo";
+  const word = m ? m[0].toLowerCase() : "";
+  const kind =
+    word === "recipe" || word === "reciept"
+      ? "Receipt" // STT mishearing — in a save-note it's virtually always a receipt
+      : word
+        ? word[0].toUpperCase() + word.slice(1)
+        : d.mime === "application/pdf"
+          ? "Document"
+          : "Photo";
   const date = new Date(d.created_at).toLocaleDateString("en-IN", {
     day: "numeric",
     month: "short",
