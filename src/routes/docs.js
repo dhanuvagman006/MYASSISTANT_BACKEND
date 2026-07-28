@@ -34,6 +34,35 @@ function uid(req, res) {
   return id;
 }
 
+/** Analyze + attach metadata + write the memory fact — shared by fresh
+ *  uploads and the lazy healing pass below. Never throws. */
+async function analyzeInBackground(userId, row, buffer, mime) {
+  try {
+    const meta = await analyzeDocument(buffer, mime);
+    if (!meta) return;
+    const updated = docs.setMetadata(userId, row.id, meta) || row;
+    // A one-line durable fact ("context") so plain chat — with no document
+    // search at all — still knows about the visit/purchase. Title + date
+    // ONLY: the note/summary live on the document row and are injected by
+    // doc search when relevant — duplicating them here made the AI read
+    // the same content twice in recall answers.
+    const when = meta.docDate || new Date().toISOString().slice(0, 10);
+    memory.remember(userId, {
+      key: `doc_${updated.id}`,
+      value: `Saved a ${updated.category || "document"}: "${updated.title}" dated ${when}`,
+      category: "context",
+      source: "ai",
+    });
+  } catch (e) {
+    console.error("docs background analyze:", e.message);
+  }
+}
+
+// One attempt per document per server boot — a doc that failed analysis
+// (key missing at the time, quota, junk output) is retried when it's next
+// listed, but a persistently broken setup can't hammer Gemini in a loop.
+const healAttempted = new Set();
+
 router.post("/", upload.single("file"), async (req, res) => {
   const id = uid(req, res);
   if (id === null) return;
@@ -41,7 +70,7 @@ router.post("/", upload.single("file"), async (req, res) => {
   if (!f || !f.buffer?.length) return res.status(400).json({ error: "file required" });
   if (!OK_MIME.has(f.mimetype)) return res.status(415).json({ error: `unsupported type ${f.mimetype}` });
 
-  let row = docs.createDocument(id, {
+  const row = docs.createDocument(id, {
     buffer: f.buffer,
     filename: f.originalname,
     mime: f.mimetype,
@@ -54,31 +83,27 @@ router.post("/", upload.single("file"), async (req, res) => {
   // background and shows up on the next GET /docs.
   res.json({ ok: true, document: docs.toClient(row), analyzed: false });
 
-  try {
-    const meta = await analyzeDocument(f.buffer, f.mimetype);
-    if (!meta) return;
-    row = docs.setMetadata(id, row.id, meta) || row;
-    // A one-line durable fact ("context") so plain chat — with no document
-    // search at all — still knows about the visit/purchase.
-    const when = meta.docDate || new Date().toISOString().slice(0, 10);
-    memory.remember(id, {
-      key: `doc_${row.id}`,
-      // Title + date ONLY. The note/summary live on the document row and
-      // are injected by doc search when relevant — duplicating them here
-      // made the AI read the same content twice in recall answers.
-      value: `Saved a ${row.category || "document"}: "${row.title}" dated ${when}`,
-      category: "context",
-      source: "ai",
-    });
-  } catch (e) {
-    console.error("docs background analyze:", e.message);
-  }
+  healAttempted.add(row.id);
+  await analyzeInBackground(id, row, f.buffer, f.mimetype);
 });
 
 router.get("/", (req, res) => {
   const id = uid(req, res);
   if (id === null) return;
-  res.json({ documents: docs.listDocuments(id).map(docs.toClient) });
+  const rows = docs.listDocuments(id);
+  res.json({ documents: rows.map(docs.toClient) });
+
+  // SELF-HEAL: docs whose analysis never landed (saved while the Gemini
+  // key was missing or broken) get another background attempt now.
+  if (!process.env.GEMINI_API_KEY) return;
+  for (const row of rows) {
+    if (row.title || healAttempted.has(row.id)) continue;
+    healAttempted.add(row.id);
+    fs.promises
+      .readFile(row.path)
+      .then((buf) => analyzeInBackground(id, row, buf, row.mime))
+      .catch((e) => console.error("docs heal read:", e.message));
+  }
 });
 
 router.get("/:id/file", (req, res) => {

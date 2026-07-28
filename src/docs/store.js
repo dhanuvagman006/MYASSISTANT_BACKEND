@@ -68,8 +68,8 @@ db.exec(`
 
 const stmts = {
   insert: db.prepare(`
-    INSERT INTO documents (user_id, filename, mime, size, path, note, created_at)
-    VALUES (@user_id, @filename, @mime, @size, @path, @note, @now)
+    INSERT INTO documents (user_id, filename, mime, size, path, note, category, created_at)
+    VALUES (@user_id, @filename, @mime, @size, @path, @note, @category, @now)
   `),
   setMeta: db.prepare(`
     UPDATE documents SET title=@title, category=@category, doc_date=@doc_date,
@@ -112,6 +112,19 @@ function extOf(mime, filename) {
   return /^\.[a-z0-9]{2,5}$/i.test(e) ? e.toLowerCase() : ".jpg";
 }
 
+/** Category guessed from the user's own words ("save this receipt…") so
+ *  recall-by-category works IMMEDIATELY, before any AI analysis — and
+ *  still works if analysis fails. AI refines it later via setMetadata. */
+function guessCategory(note) {
+  const n = String(note || "").toLowerCase();
+  if (/receipt|reciept|ರಸೀದಿ|रसीद|രസീത|ரசீது|రసీదు/.test(n)) return "receipt";
+  if (/\bbill\b|invoice|ಬಿಲ್|बिल|பில்|బిల/.test(n)) return "bill";
+  if (/prescription|पर्च/.test(n)) return "prescription";
+  if (/report|test|lab|scan|x-?ray|medical/.test(n)) return "medical";
+  if (/ticket/.test(n)) return "ticket";
+  return "other";
+}
+
 /** Save the file bytes + a metadata row. Returns the new row. */
 function createDocument(userId, { buffer, filename, mime, note = "" }) {
   // Cap: evict the oldest document (and its file) when the user is full.
@@ -126,6 +139,7 @@ function createDocument(userId, { buffer, filename, mime, note = "" }) {
     size: buffer.length,
     path: "", // set right after — we need the id for the filename
     note: String(note || "").trim().slice(0, 2000),
+    category: guessCategory(note),
     now: Date.now(),
   });
   const id = info.lastInsertRowid;
@@ -186,6 +200,10 @@ const STOP = new Set(
   ("show me the of my last a an that this those what did say said tell told give open find pull up play from for and or in on at to i you was were is are it he she they doctor doctors please can could would will hari yesterday today recent latest visit visited went hospital clinic report reports document documents file files photo copy photocopy receipt result results record records suggested suggestion suggestions advice prescribed"
   ).split(" ")
 );
+/** @returns {{hits: object[], exact: boolean}} — `exact:false` means the
+ *  last-resort path fired: nothing matched the words, so these are simply
+ *  the user's most recent documents (the caller must present them
+ *  honestly, not as confirmed matches). */
 function searchDocuments(userId, message, limit = 3) {
   const words = String(message || "")
     .toLowerCase()
@@ -205,7 +223,13 @@ function searchDocuments(userId, message, limit = 3) {
   if (rows.length === 0 && /\b(receipt|bill|invoice|paid|payment)\w*/i.test(message)) {
     rows = stmts.recentByCat.all(userId, "receipt", "bill", limit);
   }
-  return rows;
+  if (rows.length) return { hits: rows, exact: true };
+
+  // LAST RESORT: the user is clearly asking about a saved document (the
+  // caller's intent regex already fired) — showing their most recent
+  // saves beats a flat "nothing found" when keywords/categories miss
+  // (e.g. analysis hasn't run yet, or they used different words).
+  return { hits: listDocuments(userId).slice(0, limit), exact: false };
 }
 
 /** Human title when AI analysis hasn't landed (or failed): guess the kind

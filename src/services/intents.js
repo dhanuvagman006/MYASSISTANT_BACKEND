@@ -233,7 +233,7 @@ async function buildToolContext({ userId, messages, tzOffsetMin = 330, lat, lng 
       // ---- SAVED DOCUMENTS RECALL ("show me the report from my last
       // hospital visit") — pure FTS lookup, zero extra AI/network calls. ----
       if (userId && RE.docRecall.test(msg)) {
-        const hits = docsStore.searchDocuments(userId, msg, 3);
+        const { hits, exact } = docsStore.searchDocuments(userId, msg, 3);
         if (hits.length) {
           for (const d of hits) documents.push(docsStore.toClient(d));
           const lines = hits.map((d, i) =>
@@ -243,7 +243,9 @@ async function buildToolContext({ userId, messages, tzOffsetMin = 330, lat, lng 
             (d.note ? `\n   USER'S OWN NOTE (their words at save time): ${d.note}` : "")
           );
           blocks.push(
-            "TOOL RESULT — MATCHING SAVED DOCUMENTS (they are being SHOWN on the user's screen right now):\n" +
+            (exact
+              ? "TOOL RESULT — MATCHING SAVED DOCUMENTS (they are being SHOWN on the user's screen right now):\n"
+              : "TOOL RESULT — no exact keyword match, so these are the user's MOST RECENT saved documents (SHOWN on their screen now). Be honest: say you're showing their recent saves and ask if one of these is it — do NOT claim a confirmed match:\n") +
               lines.join("\n") +
               "\nBriefly confirm it's on their screen, then answer their question FROM this data — " +
               "ONCE, in 1-3 sentences. NEVER repeat the same information twice in your reply. " +
