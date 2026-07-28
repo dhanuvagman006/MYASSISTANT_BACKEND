@@ -94,10 +94,11 @@ router.get("/", (req, res) => {
   res.json({ documents: rows.map(docs.toClient) });
 
   // SELF-HEAL: docs whose analysis never landed (saved while the Gemini
-  // key was missing or broken) get another background attempt now.
+  // key was missing or broken) OR that were analyzed before full-text
+  // extraction existed get another background attempt now.
   if (!process.env.GEMINI_API_KEY) return;
   for (const row of rows) {
-    if (row.title || healAttempted.has(row.id)) continue;
+    if ((row.title && row.full_text) || healAttempted.has(row.id)) continue;
     healAttempted.add(row.id);
     fs.promises
       .readFile(row.path)

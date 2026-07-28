@@ -11,7 +11,8 @@ Look at the attached file and reply with STRICT JSON only (no markdown fences):
  "category": "medical" | "prescription" | "receipt" | "bill" | "id" | "ticket" | "other",
  "doc_date": "<yyyy-mm-dd printed on the document, or empty string>",
  "summary": "<3-6 plain sentences: what this is, key values/amounts, and anything the person must act on (medicines + dosage, follow-up dates, totals, deadlines). Keep the document's language for names.>",
- "tags": ["<5-10 lowercase search keywords: place names, doctor names, test names, illnesses, shops>"]}`;
+ "tags": ["<5-10 lowercase search keywords: place names, doctor names, test names, illnesses, shops>"],
+ "full_text": "<complete transcription of ALL text in the document, in reading order, original language and script, line breaks as \\n. For very long documents (many pages) transcribe the substantive content and totals; skip only boilerplate.>"}`;
 
 /**
  * @returns {Promise<object|null>} parsed metadata, or null on any failure —
@@ -56,6 +57,7 @@ async function analyzeDocument(buffer, mime) {
       docDate: j.doc_date,
       summary: j.summary,
       tags: j.tags,
+      fullText: j.full_text,
     };
   } catch (e) {
     console.error("doc analyze failed:", e.message);

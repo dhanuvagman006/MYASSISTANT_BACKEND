@@ -45,7 +45,16 @@ db.exec(`
     created_at INTEGER NOT NULL
   );
   CREATE INDEX IF NOT EXISTS idx_docs_user ON documents(user_id, created_at DESC);
+`);
 
+// MIGRATION (idempotent): full document text, extracted once at analysis
+// time, so "read me what's on the receipt" answers from the REAL content
+// with zero extra AI calls at recall.
+try {
+  db.exec(`ALTER TABLE documents ADD COLUMN full_text TEXT NOT NULL DEFAULT ''`);
+} catch (_) { /* column already exists */ }
+
+db.exec(`
   CREATE VIRTUAL TABLE IF NOT EXISTS docs_fts USING fts5(
     title, summary, note, tags, filename,
     content='documents', content_rowid='id', tokenize='unicode61'
@@ -73,7 +82,8 @@ const stmts = {
   `),
   setMeta: db.prepare(`
     UPDATE documents SET title=@title, category=@category, doc_date=@doc_date,
-      summary=@summary, tags=@tags WHERE id=@id AND user_id=@user_id
+      summary=@summary, tags=@tags, full_text=@full_text
+      WHERE id=@id AND user_id=@user_id
   `),
   setNote: db.prepare(
     "UPDATE documents SET note=? WHERE id=? AND user_id=?"
@@ -150,7 +160,7 @@ function createDocument(userId, { buffer, filename, mime, note = "" }) {
 }
 
 /** Attach AI-extracted metadata (safe against junk model output). */
-function setMetadata(userId, id, { title, category, docDate, summary, tags }) {
+function setMetadata(userId, id, { title, category, docDate, summary, tags, fullText }) {
   const CATS = new Set(["medical", "prescription", "receipt", "bill", "id", "ticket", "other"]);
   stmts.setMeta.run({
     id,
@@ -162,6 +172,10 @@ function setMetadata(userId, id, { title, category, docDate, summary, tags }) {
     tags: (Array.isArray(tags) ? tags.join(", ") : String(tags || ""))
       .toLowerCase()
       .slice(0, 300),
+    // Complete transcription — makes "read it to me / what's the total /
+    // explain this" answerable from the REAL content. Capped for sanity;
+    // recall injects a smaller slice.
+    full_text: String(fullText || "").trim().slice(0, 12000),
   });
   return stmts.byId.get(id, userId);
 }

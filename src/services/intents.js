@@ -242,17 +242,28 @@ async function buildToolContext({ userId, messages, tzOffsetMin = 330, lat, lng 
             (d.summary ? ` — ${d.summary}` : "") +
             (d.note ? `\n   USER'S OWN NOTE (their words at save time): ${d.note}` : "")
           );
+          // Full text of the BEST match only (token budget) — makes
+          // "read it to me / what's the total / explain this" answerable
+          // from the real content, not just the summary.
+          const top = hits[0];
+          const fullText = String(top.full_text || "").slice(0, 3500);
           blocks.push(
             (exact
               ? "TOOL RESULT — MATCHING SAVED DOCUMENTS (they are being SHOWN on the user's screen right now):\n"
               : "TOOL RESULT — no exact keyword match, so these are the user's MOST RECENT saved documents (SHOWN on their screen now). Be honest: say you're showing their recent saves and ask if one of these is it — do NOT claim a confirmed match:\n") +
               lines.join("\n") +
+              (fullText
+                ? `\nCOMPLETE TEXT OF DOCUMENT 1 (exactly as printed):\n${fullText}`
+                : "") +
               "\nBriefly confirm it's on their screen, then answer their question FROM this data — " +
-              "ONCE, in 1-3 sentences. NEVER repeat the same information twice in your reply. " +
+              "ONCE, concisely. NEVER repeat the same information twice in your reply. " +
               "NEVER say a file name aloud (no .jpg/.pdf names) — refer to it by its title or just 'this receipt/report'. " +
+              "If they ask what's written, to read it, or what something means: use the COMPLETE TEXT — " +
+              "keep every amount, date, medicine and name EXACT, and explain unfamiliar terms in simple, " +
+              "reassuring plain language a non-expert immediately understands. " +
               "Include the USER'S OWN NOTE only when they asked what was said/suggested/advised, " +
               "or when it directly answers the question — otherwise skip it. " +
-              "Never invent details that are not above."
+              "Never invent details that are not above; if the text doesn't contain what they asked, say so graciously."
           );
           sources.push({ name: "Your saved documents", url: "" });
         } else {
