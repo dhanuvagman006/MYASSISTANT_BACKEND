@@ -48,8 +48,15 @@ router.post("/", upload.single("file"), async (req, res) => {
     note: req.body.note,
   });
 
-  const meta = await analyzeDocument(f.buffer, f.mimetype);
-  if (meta) {
+  // Respond the moment the file is safely on disk — a voice "save this
+  // receipt" must not hold the conversation hostage to a slow AI call.
+  // Analysis (title/summary/tags + the memory fact) completes in the
+  // background and shows up on the next GET /docs.
+  res.json({ ok: true, document: docs.toClient(row), analyzed: false });
+
+  try {
+    const meta = await analyzeDocument(f.buffer, f.mimetype);
+    if (!meta) return;
     row = docs.setMetadata(id, row.id, meta) || row;
     // A one-line durable fact ("context") so plain chat — with no document
     // search at all — still knows about the visit/purchase.
@@ -60,8 +67,9 @@ router.post("/", upload.single("file"), async (req, res) => {
       category: "context",
       source: "ai",
     });
+  } catch (e) {
+    console.error("docs background analyze:", e.message);
   }
-  res.json({ ok: true, document: docs.toClient(row), analyzed: !!meta });
 });
 
 router.get("/", (req, res) => {
