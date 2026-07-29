@@ -1,9 +1,9 @@
 /**
  * AGENT CALL FLOW TEST — boots the real server and walks a call through
- * every webhook exactly as Twilio would, with:
- *   • signature validation off (TWILIO_VALIDATE=false)
+ * every webhook exactly as Plivo would, with:
+ *   • signature validation off (PLIVO_VALIDATE=false)
  *   • NO AI keys — every engine fallback path must hold the call together
- *   • Twilio's REST API stubbed by pointing at an unconfigured state for
+ *   • Plivo REST API stubbed by pointing at an unconfigured state for
  *     the 503 test, then faking a dialed call directly in the store.
  *
  * Run: node scripts/agentcall-test.js
@@ -12,10 +12,10 @@ process.env.JWT_SECRET = "x".repeat(48);
 process.env.AUTH_DISABLED = "true";
 process.env.DATA_DIR = "/tmp/agentcall-test-" + Date.now();
 process.env.PORT = "3777";
-process.env.TWILIO_VALIDATE = "false";
+process.env.PLIVO_VALIDATE = "false";
 delete process.env.GROQ_API_KEY;
 delete process.env.GEMINI_API_KEY;
-delete process.env.TWILIO_ACCOUNT_SID; // start UNconfigured for the 503 test
+delete process.env.PLIVO_AUTH_ID; // start UNconfigured for the 503 test
 
 const assert = require("assert");
 const BASE = "http://localhost:3777";
@@ -50,21 +50,21 @@ async function main() {
     contactName: "Allen Lobo",
     task: "ask him what time he will come home",
   });
-  assert.strictEqual(r.status, 503, "expected 503 when Twilio unset, got " + r.status);
-  console.log("✔ 503 when Twilio not configured");
+  assert.strictEqual(r.status, 503, "expected 503 when Plivo unset, got " + r.status);
+  console.log("✔ 503 when Plivo not configured");
 
-  // 2) Configure Twilio env (REST calls won't fire — we drive webhooks
+  // 2) Configure Plivo env (REST calls won't fire — we drive webhooks
   //    directly), create a call row like POST / would after dialing.
-  process.env.TWILIO_ACCOUNT_SID = "ACtest";
-  process.env.TWILIO_AUTH_TOKEN = "testtoken";
-  process.env.TWILIO_FROM_NUMBER = "+15550001111";
+  process.env.PLIVO_AUTH_ID = "MAtest";
+  process.env.PLIVO_AUTH_TOKEN = "testtoken";
+  process.env.PLIVO_FROM_NUMBER = "+919999888877";
   process.env.PUBLIC_BASE_URL = BASE;
 
-  const twilio = require("../src/agentcall/twilio");
-  assert.strictEqual(twilio.toE164("98765 43210"), "+919876543210");
-  assert.strictEqual(twilio.toE164("+1 415-555-2671"), "+14155552671");
-  assert.strictEqual(twilio.toE164("098765-43210"), "+919876543210");
-  assert.strictEqual(twilio.toE164("abc"), null);
+  const plivo = require("../src/agentcall/plivo");
+  assert.strictEqual(plivo.toE164("98765 43210"), "+919876543210");
+  assert.strictEqual(plivo.toE164("+1 415-555-2671"), "+14155552671");
+  assert.strictEqual(plivo.toE164("098765-43210"), "+919876543210");
+  assert.strictEqual(plivo.toE164("abc"), null);
   console.log("✔ E.164 normalization (India default, intl passthrough)");
 
   const store = require("../src/agentcall/store");
@@ -77,30 +77,34 @@ async function main() {
   });
   store.setState(call.id, "dialing");
 
-  // 3) Contact answers → /voice returns Say + Gather TwiML (fallback line).
-  r = await post(`/agent-call/twilio/${call.id}/voice`, { AnsweredBy: "human" }, true);
+  // 3) Contact answers → /answer returns GetInput+Speak XML (fallback line).
+  store.setState(call.id, "dialing");
+  r = await post(`/agent-call/plivo/${call.id}/answer`, { CallStatus: "in-progress" }, true);
   assert.strictEqual(r.status, 200);
-  assert.ok(r.text.includes("<Gather"), "voice must listen after speaking");
+  assert.ok(r.text.includes("<GetInput"), "answer must listen while speaking");
+  assert.ok(r.text.includes('inputType="speech"'), "must use speech ASR");
   assert.ok(/Hari/.test(r.text), "opening should introduce Hari");
-  console.log("✔ /voice: opening line + gather");
+  console.log("✔ /answer: opening line + speech GetInput");
 
-  // 4) Voicemail path on a fresh call → hang up + no_answer.
+  // 4) Voicemail: machine_detection=hangup ends the call at Plivo, our
+  //    /hangup webhook sees the machine cause on a still-dialing call.
   const vm = store.create({
     userId: "anonymous-dev",
     contactName: "Allen Lobo",
     toNumber: "+919876543210",
     task: "ask him when he's home",
   });
-  r = await post(`/agent-call/twilio/${vm.id}/voice`, { AnsweredBy: "machine_start" }, true);
-  assert.ok(r.text.includes("<Hangup"), "voicemail must hang up");
+  store.setState(vm.id, "dialing");
+  r = await post(`/agent-call/plivo/${vm.id}/hangup`, { CallStatus: "completed", HangupCause: "MACHINE_DETECTED" }, true);
   assert.strictEqual(store.get(vm.id).state, "no_answer");
-  console.log("✔ /voice: voicemail detected → no_answer");
+  assert.ok(store.get(vm.id).result.includes("voicemail"));
+  console.log("✔ /hangup: voicemail (machine detected) → no_answer");
 
-  // 5) Contact replies → /gather. With no AI keys the fallback thanks
+  // 5) Contact replies → /input. With no AI keys the fallback thanks
   //    them, hangs up, and the summary carries their words.
   r = await post(
-    `/agent-call/twilio/${call.id}/gather`,
-    { SpeechResult: "I will be home around 7 30 in the evening" },
+    `/agent-call/plivo/${call.id}/input`,
+    { Speech: "I will be home around 7 30 in the evening" },
     true
   );
   assert.strictEqual(r.status, 200);
@@ -113,7 +117,7 @@ async function main() {
     "summary must contain the contact's answer, got: " + done.result
   );
   assert.strictEqual(done.transcript.filter((t) => t.who === "contact").length, 1);
-  console.log("✔ /gather: reply captured → completed, summary =", JSON.stringify(done.result));
+  console.log("✔ /input: reply captured → completed, summary =", JSON.stringify(done.result));
 
   // 6) App poll returns the result; a different user must get 404.
   r = await fetch(`${BASE}/agent-call/${call.id}`).then(async (x) => ({
@@ -125,18 +129,19 @@ async function main() {
   assert.ok(r.json.result.includes("7 30"));
   console.log("✔ GET /agent-call/:id: poll sees completed + result");
 
-  // 7) status webhook: no-answer marks the call terminal.
+  // 7) hangup webhook: no-answer while dialing marks the call terminal.
   const na = store.create({
     userId: "anonymous-dev",
     contactName: "Amma",
     toNumber: "+919876500000",
     task: "tell her dinner is at 8",
   });
-  r = await post(`/agent-call/twilio/${na.id}/status`, { CallStatus: "no-answer" }, true);
+  store.setState(na.id, "dialing");
+  r = await post(`/agent-call/plivo/${na.id}/hangup`, { CallStatus: "no-answer", HangupCause: "NO_ANSWER" }, true);
   assert.strictEqual(store.get(na.id).state, "no_answer");
-  console.log("✔ /status: no-answer → terminal state");
+  console.log("✔ /hangup: no-answer → terminal state");
 
-  // 8) status "completed" after a mid-call hangup still summarizes.
+  // 8) Contact hangs up mid-conversation → still summarized.
   const hung = store.create({
     userId: "anonymous-dev",
     contactName: "Ravi",
@@ -146,19 +151,36 @@ async function main() {
   store.setState(hung.id, "in_progress");
   store.addTurn(hung.id, "agent", "Hi, did the parcel arrive?");
   store.addTurn(hung.id, "contact", "Yes it came this morning");
-  await post(`/agent-call/twilio/${hung.id}/status`, { CallStatus: "completed" }, true);
+  await post(`/agent-call/plivo/${hung.id}/hangup`, { CallStatus: "completed", HangupCause: "NORMAL_CLEARING" }, true);
   await sleep(300);
   const h = store.get(hung.id);
   assert.strictEqual(h.state, "completed");
   assert.ok(h.result.includes("this morning"), "hangup summary keeps the answer");
-  console.log("✔ /status: early hangup → summarized from transcript");
+  console.log("✔ /hangup: early hangup → summarized from transcript");
 
   // 9) Bad inputs.
   r = await post("/agent-call", { toNumber: "??", contactName: "X", task: "hi" });
   assert.strictEqual(r.status, 400);
-  r = await post(`/agent-call/twilio/deadbeef/voice`, {}, true);
+  r = await post(`/agent-call/plivo/deadbeef/answer`, {}, true);
   assert.strictEqual(r.status, 404);
   console.log("✔ validation: bad number 400, unknown call 404");
+
+  // 10) Plivo V2 signature: HMAC-SHA256(token, url + nonce), base64.
+  process.env.PLIVO_VALIDATE = "true";
+  const crypto = require("crypto");
+  const url = BASE + "/agent-call/plivo/x/input";
+  const nonce = "12345";
+  const good = crypto.createHmac("sha256", "testtoken").update(url + nonce).digest("base64");
+  const mkReq = (sig) => ({
+    get: (h) => (h === "X-Plivo-Signature-V2" ? sig : h === "X-Plivo-Signature-V2-Nonce" ? nonce : ""),
+    originalUrl: "/agent-call/plivo/x/input",
+    body: {},
+  });
+  assert.strictEqual(plivo.validSignature(mkReq(good)), true);
+  assert.strictEqual(plivo.validSignature(mkReq("bad" + good)), false);
+  assert.strictEqual(plivo.validSignature(mkReq("")), false);
+  process.env.PLIVO_VALIDATE = "false";
+  console.log("✔ Plivo V2 webhook signature validation");
 
   console.log("\nAGENT CALL TEST PASSED ✔");
   process.exit(0);

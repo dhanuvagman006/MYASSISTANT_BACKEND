@@ -1,44 +1,47 @@
 /**
  * AGENT CALLS — "call Allen Lobo and ask him what time he'll be home."
+ * Telephony: PLIVO (India-capable — rents real +91 numbers with domestic
+ * routing once business KYC is approved; works over international routes
+ * meanwhile with the identical code path).
  *
  * App-facing (behind appAuth, mounted in server.js):
  *   POST /agent-call            {toNumber, contactName, task, lang?} → {id, state}
  *   GET  /agent-call/:id        → {id, state, result, contactName, transcript}
  *
- * Twilio-facing (NO app JWT — Twilio's servers call these; each request
- * is authenticated by its X-Twilio-Signature instead):
- *   POST /agent-call/twilio/:id/voice    first TwiML (opening line + listen)
- *   POST /agent-call/twilio/:id/gather   contact's speech → next AI turn
- *   POST /agent-call/twilio/:id/status   ringing/answered/no-answer/ended
+ * Plivo-facing (NO app JWT — Plivo's servers call these; each request is
+ * authenticated by its X-Plivo-Signature-V2 instead):
+ *   POST /agent-call/plivo/:id/answer   contact picked up → opening XML
+ *   POST /agent-call/plivo/:id/input    contact's speech → next AI turn
+ *   POST /agent-call/plivo/:id/hangup   call ended (any reason)
  *
- * Flow: app POSTs → Twilio dials the contact → contact picks up → /voice
- * speaks the opening question → /gather loops (AI decides each reply,
- * hangs up when the goal is met) → /status "completed" triggers the
+ * Flow: app POSTs → Plivo dials the contact → contact picks up → /answer
+ * speaks the opening question while listening → /input loops (AI decides
+ * each reply, hangs up when the goal is met) → /hangup triggers the
  * summary → the app's poll sees state=completed and SPEAKS the result.
  */
 const express = require("express");
 const store = require("./store");
-const twilio = require("./twilio");
+const plivo = require("./plivo");
 const engine = require("./engine");
 const { findById } = require("../db");
 
 const router = express.Router();
 
-// Twilio posts application/x-www-form-urlencoded.
+// Plivo posts application/x-www-form-urlencoded.
 router.use(express.urlencoded({ extended: false }));
 
 // ---------------- app-facing ----------------
 
 router.post("/", async (req, res) => {
-  if (!twilio.configured()) {
+  if (!plivo.configured()) {
     return res.status(503).json({
       error:
-        "agent calling not configured — set TWILIO_ACCOUNT_SID, " +
-        "TWILIO_AUTH_TOKEN, TWILIO_FROM_NUMBER and PUBLIC_BASE_URL",
+        "agent calling not configured — set PLIVO_AUTH_ID, " +
+        "PLIVO_AUTH_TOKEN, PLIVO_FROM_NUMBER and PUBLIC_BASE_URL",
     });
   }
   const { toNumber, contactName, task, lang } = req.body || {};
-  const to = twilio.toE164(toNumber);
+  const to = plivo.toE164(toNumber);
   if (!to) return res.status(400).json({ error: "valid toNumber required" });
   const name = String(contactName || "").trim().slice(0, 80);
   const what = String(task || "").trim().slice(0, 500);
@@ -55,8 +58,8 @@ router.post("/", async (req, res) => {
   });
 
   try {
-    const sid = await twilio.createCall({ to, callId: call.id });
-    store.setTwilioSid(call.id, sid);
+    const uuid = await plivo.createCall({ to, callId: call.id });
+    store.setProviderId(call.id, uuid);
     store.setState(call.id, "dialing");
     res.status(202).json({ id: call.id, state: "dialing" });
   } catch (e) {
@@ -81,11 +84,11 @@ router.get("/:id", (req, res) => {
   });
 });
 
-// ---------------- Twilio webhooks ----------------
+// ---------------- Plivo webhooks ----------------
 
-/** Signature + call-exists guard shared by all three webhooks. */
+/** Signature + call-exists guard shared by all webhooks. */
 function webhookGuard(req, res) {
-  if (!twilio.validSignature(req)) {
+  if (!plivo.validSignature(req)) {
     res.status(403).type("text/plain").send("bad signature");
     return null;
   }
@@ -97,27 +100,16 @@ function webhookGuard(req, res) {
   return call;
 }
 
-const gatherUrl = (id) =>
+const inputUrl = (id) =>
   `${(process.env.PUBLIC_BASE_URL || "").replace(/\/+$/, "")}` +
-  `/agent-call/twilio/${id}/gather`;
+  `/agent-call/plivo/${id}/input`;
 
-/** The contact picked up: speak the opening question, then listen. */
-router.post("/twilio/:id/voice", async (req, res) => {
+/** The contact picked up: speak the opening question while listening.
+ *  (Voicemail never reaches here — machine_detection=hangup ends those
+ *  calls at Plivo; /hangup then marks them no_answer.) */
+router.post("/plivo/:id/answer", async (req, res) => {
   const call = webhookGuard(req, res);
   if (!call) return;
-
-  // Voicemail answered instead of a human — don't interrogate a robot.
-  const answeredBy = String(req.body.AnsweredBy || "");
-  if (answeredBy.startsWith("machine")) {
-    store.setResult(
-      call.id,
-      `${call.contact_name} didn't pick up — the call went to voicemail.`,
-      "no_answer"
-    );
-    return res
-      .type("text/xml")
-      .send(twilio.twimlSayHangup({ text: "", lang: call.lang }));
-  }
 
   store.setState(call.id, "in_progress");
   const user = /^\d+$/.test(String(call.user_id))
@@ -126,20 +118,20 @@ router.post("/twilio/:id/voice", async (req, res) => {
   const opening = await engine.openingLine(call, user?.name);
   store.addTurn(call.id, "agent", opening);
   res.type("text/xml").send(
-    twilio.twimlSayGather({
+    plivo.xmlSpeakGetInput({
       text: opening,
-      actionUrl: gatherUrl(call.id),
+      actionUrl: inputUrl(call.id),
       lang: call.lang,
     })
   );
 });
 
 /** The contact spoke (or stayed silent): AI decides the next line. */
-router.post("/twilio/:id/gather", async (req, res) => {
+router.post("/plivo/:id/input", async (req, res) => {
   const call = webhookGuard(req, res);
   if (!call) return;
 
-  const heard = String(req.body.SpeechResult || "").trim();
+  const heard = String(req.body.Speech || req.body.speech || "").trim();
   if (heard) store.addTurn(call.id, "contact", heard);
 
   // Silence twice in a row → give up gracefully instead of looping.
@@ -150,7 +142,7 @@ router.post("/twilio/:id/gather", async (req, res) => {
     finishCall(call.id);
     return res
       .type("text/xml")
-      .send(twilio.twimlSayHangup({ text: bye, lang: call.lang }));
+      .send(plivo.xmlSpeakHangup({ text: bye, lang: call.lang }));
   }
 
   const fresh = store.get(call.id);
@@ -163,37 +155,47 @@ router.post("/twilio/:id/gather", async (req, res) => {
     finishCall(call.id);
     return res
       .type("text/xml")
-      .send(twilio.twimlSayHangup({ text: turn.say, lang: call.lang }));
+      .send(plivo.xmlSpeakHangup({ text: turn.say, lang: call.lang }));
   }
   res.type("text/xml").send(
-    twilio.twimlSayGather({
+    plivo.xmlSpeakGetInput({
       text: turn.say,
-      actionUrl: gatherUrl(call.id),
+      actionUrl: inputUrl(call.id),
       lang: call.lang,
     })
   );
 });
 
-/** Lifecycle events: no-answer/busy/failed, and completed → summarize. */
-router.post("/twilio/:id/status", (req, res) => {
+/** The call ended — any reason, either side. */
+router.post("/plivo/:id/hangup", (req, res) => {
   const call = webhookGuard(req, res);
   if (!call) return;
-  const status = String(req.body.CallStatus || "");
+  const cause = String(req.body.HangupCause || "").toUpperCase();
+  const status = String(req.body.CallStatus || "").toLowerCase();
+  const machine = /MACHINE/.test(cause);
+  const notAnswered =
+    machine ||
+    ["busy", "no-answer", "cancel", "timeout"].includes(status) ||
+    ["NO_ANSWER", "USER_BUSY", "ORIGINATOR_CANCEL", "NO_USER_RESPONSE"].includes(cause);
 
-  if (["no-answer", "busy", "canceled"].includes(status)) {
+  if (store.isDone(call.state)) {
+    // already terminal (we hung up after finishing) — nothing to do
+  } else if (call.state === "dialing" && notAnswered) {
     store.setResult(
       call.id,
-      `${call.contact_name} didn't answer the call.`,
+      machine
+        ? `${call.contact_name} didn't pick up — the call went to voicemail.`
+        : `${call.contact_name} didn't answer the call.`,
       "no_answer"
     );
-  } else if (status === "failed") {
+  } else if (call.state === "dialing") {
     store.setResult(
       call.id,
       `I couldn't reach ${call.contact_name} — the call failed.`,
       "failed"
     );
-  } else if (status === "completed" && !store.isDone(call.state)) {
-    // Hung up (either side) without our explicit finish — summarize anyway.
+  } else {
+    // Was mid-conversation: contact hung up early — summarize what we got.
     finishCall(call.id);
   }
   res.type("text/plain").send("ok");

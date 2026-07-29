@@ -66,13 +66,14 @@ app.use(
 app.use("/reminders", appAuth, require("./reminders/routes"));
 
 // AGENT CALLS — "call Allen and ask when he'll be home": the backend
-// dials via Twilio and the AI TALKS on the call, then the app speaks
-// the answer back. Twilio's webhooks arrive WITHOUT an app JWT — they
-// are authenticated per-request by X-Twilio-Signature inside the route.
+// dials via PLIVO (India-capable: real +91 numbers + domestic routing
+// once KYC'd) and the AI TALKS on the call, then the app speaks the
+// answer back. Plivo's webhooks arrive WITHOUT an app JWT — they are
+// authenticated per-request by X-Plivo-Signature-V2 inside the route.
 app.use(
   "/agent-call",
   (req, res, next) =>
-    req.path.startsWith("/twilio/") ? next() : appAuth(req, res, next),
+    req.path.startsWith("/plivo/") ? next() : appAuth(req, res, next),
   require("./agentcall/routes")
 );
 

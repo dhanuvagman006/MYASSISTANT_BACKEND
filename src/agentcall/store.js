@@ -21,13 +21,21 @@ db.exec(`
       -- queued | dialing | in_progress | completed | no_answer | failed
     transcript   TEXT NOT NULL DEFAULT '[]',  -- JSON [{who:'agent'|'contact', text}]
     result       TEXT,                        -- summary spoken back to the user
-    twilio_sid   TEXT,
+    provider_call_id TEXT,          -- Plivo request/call UUID
     created_at   INTEGER NOT NULL,
     updated_at   INTEGER NOT NULL
   );
   CREATE INDEX IF NOT EXISTS idx_agent_calls_user
     ON agent_calls (user_id, created_at DESC);
 `);
+
+// Dev-DB migration: earlier builds named the column twilio_sid.
+try {
+  const cols = db.prepare("PRAGMA table_info(agent_calls)").all().map((c) => c.name);
+  if (cols.includes("twilio_sid") && !cols.includes("provider_call_id")) {
+    db.exec("ALTER TABLE agent_calls RENAME COLUMN twilio_sid TO provider_call_id");
+  }
+} catch (_) {}
 
 const stmts = {
   insert: db.prepare(`
@@ -39,8 +47,8 @@ const stmts = {
   setState: db.prepare(
     "UPDATE agent_calls SET state = ?, updated_at = ? WHERE id = ?"
   ),
-  setSid: db.prepare(
-    "UPDATE agent_calls SET twilio_sid = ?, updated_at = ? WHERE id = ?"
+  setProviderId: db.prepare(
+    "UPDATE agent_calls SET provider_call_id = ?, updated_at = ? WHERE id = ?"
   ),
   setTranscript: db.prepare(
     "UPDATE agent_calls SET transcript = ?, updated_at = ? WHERE id = ?"
@@ -83,8 +91,8 @@ function setState(id, state) {
   stmts.setState.run(state, Date.now(), id);
 }
 
-function setTwilioSid(id, sid) {
-  stmts.setSid.run(sid, Date.now(), id);
+function setProviderId(id, providerId) {
+  stmts.setProviderId.run(providerId, Date.now(), id);
 }
 
 /** Appends one turn and returns the updated transcript array. */
@@ -105,4 +113,4 @@ function setResult(id, result, state = "completed") {
 const DONE = new Set(["completed", "no_answer", "failed"]);
 const isDone = (state) => DONE.has(state);
 
-module.exports = { create, get, setState, setTwilioSid, addTurn, setResult, isDone };
+module.exports = { create, get, setState, setProviderId, addTurn, setResult, isDone };

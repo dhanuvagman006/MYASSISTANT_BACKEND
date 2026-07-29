@@ -171,32 +171,51 @@ Voice ordering via **Swiggy Builders Club MCP** (mcp.swiggy.com/builders).
   the URL); apply for Builders Club production access with a demo video.
 
 ## Update — 29 July 2026: Agent calls (AI talks on real phone calls)
-"Call Allen Lobo and ask him at what time he will come home" — Hari now
-PLACES the call itself (Twilio), speaks to the contact, converses until the
-task is done, hangs up politely, and the app speaks the answer back.
+"Call Allen Lobo and ask him at what time he will come home" — Hari
+PLACES the call itself, speaks to the contact, converses until the task is
+done, hangs up politely, and the app speaks the answer back.
+
+**Telephony provider: PLIVO** (Twilio was implemented first, then REPLACED
+at the user's request for India support). Why Plivo: it rents real Indian
+(+91) numbers with DOMESTIC routing (requires an India-registered business
+KYC, ~1 day — contacts then see a local caller ID, calls stay on Indian
+trunks per TRAI media-anchoring). Before KYC, the same account reaches
+Indian numbers over international routes (dev/testing) with the identical
+code path. Twilio was rejected because it sells no Indian numbers and, per
+Indian regulation (Aug 2024), +91→+91 caller IDs don't work over it.
+Exotel was evaluated and rejected for now: its voicebot applet streams RAW
+audio over WebSocket with no built-in STT/TTS (a much bigger build).
+
 - **`src/agentcall/store.js`** — `agent_calls` table (unguessable hex ids,
-  per-user, JSON transcript, result summary, terminal-state helper).
-- **`src/agentcall/twilio.js`** — SDK-free REST client (create call, hangup),
-  E.164 normalization (10-digit → +91 by default, `DEFAULT_COUNTRY_CODE`),
-  X-Twilio-Signature validation (timing-safe), TwiML builders (Polly neural
-  voices for en-IN/hi-IN, `<Gather input="speech">` with deepgram model),
-  answering-machine detection.
+  per-user, JSON transcript, result summary, `provider_call_id`; dev-DB
+  migration renames the old `twilio_sid` column automatically).
+- **`src/agentcall/plivo.js`** — SDK-free REST client (create call with
+  `machine_detection=hangup`, hangup), E.164 normalization (10-digit → +91
+  default, `DEFAULT_COUNTRY_CODE`), X-Plivo-Signature-V2 validation
+  (HMAC-SHA256(url+nonce), timing-safe, multi-signature token rotation),
+  Plivo XML builders: `<Speak>` nested inside `<GetInput inputType="speech">`
+  (contact can talk over the prompt; silence falls through to `<Redirect>`
+  so our handler always runs), Polly.Aditi for en-IN/hi-IN.
 - **`src/agentcall/engine.js`** — call brain on the existing provider chain:
   openingLine / nextTurn (strict-JSON `{say,done}`) / summarize. EVERY step
   has a deterministic fallback so a dead AI never strands a live call; hard
-  cap of 6 agent turns. Guardrails in the system prompt: no private info
+  cap of 6 agent turns. Guardrails: AI discloses itself, no private info
   beyond the task, no commitments/payments on the user's behalf.
 - **`src/agentcall/routes.js`** — app-facing `POST /agent-call` (503 when
-  Twilio env unset → app falls back to direct dial), `GET /agent-call/:id`
-  (ownership-checked poll); Twilio webhooks `/twilio/:id/{voice,gather,status}`
-  mounted BEFORE appAuth (browser-less server-to-server), each request
-  authenticated by signature instead. Voicemail → no_answer; double silence →
-  graceful goodbye; early hangup → still summarized from the transcript.
-- **Env**: `TWILIO_ACCOUNT_SID`, `TWILIO_AUTH_TOKEN`, `TWILIO_FROM_NUMBER`,
+  Plivo env unset → app falls back to direct dial), `GET /agent-call/:id`
+  (ownership-checked poll); Plivo webhooks `/plivo/:id/{answer,input,hangup}`
+  mounted BEFORE appAuth (server-to-server), each request authenticated by
+  signature instead. Voicemail (machine cause on /hangup) → no_answer;
+  double silence → graceful goodbye; early hangup → summarized anyway.
+- **Env**: `PLIVO_AUTH_ID`, `PLIVO_AUTH_TOKEN`, `PLIVO_FROM_NUMBER`,
   `PUBLIC_BASE_URL` (all four required), optional `DEFAULT_COUNTRY_CODE=91`,
-  `TWILIO_VALIDATE=false` (dev tunnels only). `/config` gained
+  `PLIVO_VALIDATE=false` (dev tunnels only). `/config` has
   `features.agent_calls`.
-- **Tests** — `scripts/agentcall-test.js` (now part of `npm test`): walks the
-  full webhook lifecycle with no AI keys (fallbacks) — 503 unconfigured,
-  E.164, opening+gather, voicemail, answer→summary ("…around 7 30…"), poll,
-  no-answer, early-hangup summary, input validation. ALL PASSING.
+- **Tests** — `scripts/agentcall-test.js` (part of `npm test`): full webhook
+  lifecycle with no AI keys (fallbacks) — 503 unconfigured, E.164,
+  answer+GetInput, voicemail, reply→summary ("…around 7 30…"), poll,
+  no-answer, early-hangup summary, validation, V2 signature check. PASSING.
+- **India compliance note**: personal assistant calls to the user's own
+  contacts are not commercial telemarketing, and the agent discloses itself
+  on every call; for scale, review TRAI AI-calling rules (disclosure,
+  consent, number series).
