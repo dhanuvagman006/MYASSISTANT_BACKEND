@@ -169,3 +169,34 @@ Voice ordering via **Swiggy Builders Club MCP** (mcp.swiggy.com/builders).
   cancel path, closed-restaurant filtering all pass).
 - TODO: app needs a "Connect Swiggy" button (call /swiggy/connect, open
   the URL); apply for Builders Club production access with a demo video.
+
+## Update — 29 July 2026: Agent calls (AI talks on real phone calls)
+"Call Allen Lobo and ask him at what time he will come home" — Hari now
+PLACES the call itself (Twilio), speaks to the contact, converses until the
+task is done, hangs up politely, and the app speaks the answer back.
+- **`src/agentcall/store.js`** — `agent_calls` table (unguessable hex ids,
+  per-user, JSON transcript, result summary, terminal-state helper).
+- **`src/agentcall/twilio.js`** — SDK-free REST client (create call, hangup),
+  E.164 normalization (10-digit → +91 by default, `DEFAULT_COUNTRY_CODE`),
+  X-Twilio-Signature validation (timing-safe), TwiML builders (Polly neural
+  voices for en-IN/hi-IN, `<Gather input="speech">` with deepgram model),
+  answering-machine detection.
+- **`src/agentcall/engine.js`** — call brain on the existing provider chain:
+  openingLine / nextTurn (strict-JSON `{say,done}`) / summarize. EVERY step
+  has a deterministic fallback so a dead AI never strands a live call; hard
+  cap of 6 agent turns. Guardrails in the system prompt: no private info
+  beyond the task, no commitments/payments on the user's behalf.
+- **`src/agentcall/routes.js`** — app-facing `POST /agent-call` (503 when
+  Twilio env unset → app falls back to direct dial), `GET /agent-call/:id`
+  (ownership-checked poll); Twilio webhooks `/twilio/:id/{voice,gather,status}`
+  mounted BEFORE appAuth (browser-less server-to-server), each request
+  authenticated by signature instead. Voicemail → no_answer; double silence →
+  graceful goodbye; early hangup → still summarized from the transcript.
+- **Env**: `TWILIO_ACCOUNT_SID`, `TWILIO_AUTH_TOKEN`, `TWILIO_FROM_NUMBER`,
+  `PUBLIC_BASE_URL` (all four required), optional `DEFAULT_COUNTRY_CODE=91`,
+  `TWILIO_VALIDATE=false` (dev tunnels only). `/config` gained
+  `features.agent_calls`.
+- **Tests** — `scripts/agentcall-test.js` (now part of `npm test`): walks the
+  full webhook lifecycle with no AI keys (fallbacks) — 503 unconfigured,
+  E.164, opening+gather, voicemail, answer→summary ("…around 7 30…"), poll,
+  no-answer, early-hangup summary, input validation. ALL PASSING.

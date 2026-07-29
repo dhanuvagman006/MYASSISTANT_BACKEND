@@ -26,5 +26,6 @@ module.exports = {
     morning_briefing: false,  // C2
     photo_questions: false,   // B1
     live_info_cards: false,   // A5 structured answer cards
+    agent_calls: true,        // "call X and ask Y" — AI talks on the call
   },
 };

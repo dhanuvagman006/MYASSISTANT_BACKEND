@@ -65,6 +65,17 @@ app.use(
 // Reminders (voice-created via /chat intents + Today screen CRUD).
 app.use("/reminders", appAuth, require("./reminders/routes"));
 
+// AGENT CALLS — "call Allen and ask when he'll be home": the backend
+// dials via Twilio and the AI TALKS on the call, then the app speaks
+// the answer back. Twilio's webhooks arrive WITHOUT an app JWT — they
+// are authenticated per-request by X-Twilio-Signature inside the route.
+app.use(
+  "/agent-call",
+  (req, res, next) =>
+    req.path.startsWith("/twilio/") ? next() : appAuth(req, res, next),
+  require("./agentcall/routes")
+);
+
 // Live data for the Today screen (weather card, headlines).
 const wxTool = require("./services/tools/weather");
 const newsTool = require("./services/tools/news");
