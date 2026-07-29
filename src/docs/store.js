@@ -286,7 +286,13 @@ function toClient(d) {
   };
 }
 
+/** How many documents a user has saved (plan-cap checks). */
+function countDocuments(userId) {
+  return stmts.count.get(String(userId)).n;
+}
+
 module.exports = {
+  countDocuments,
   createDocument,
   setMetadata,
   setNote,

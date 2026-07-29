@@ -18,6 +18,7 @@ const fs = require("fs");
 const docs = require("../docs/store");
 const { analyzeDocument } = require("../docs/analyze");
 const memory = require("../memory/store");
+const billing = require("../billing/routes");
 
 const upload = multer({
   storage: multer.memoryStorage(),
@@ -63,7 +64,11 @@ async function analyzeInBackground(userId, row, buffer, mime) {
 // listed, but a persistently broken setup can't hammer Gemini in a loop.
 const healAttempted = new Set();
 
-router.post("/", upload.single("file"), async (req, res) => {
+router.post(
+  "/",
+  billing.enforceDocUpload((uid) => docs.countDocuments(uid)),
+  upload.single("file"),
+  async (req, res) => {
   const id = uid(req, res);
   if (id === null) return;
   const f = req.file;

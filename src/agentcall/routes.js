@@ -24,6 +24,7 @@ const store = require("./store");
 const plivo = require("./plivo");
 const engine = require("./engine");
 const { findById } = require("../db");
+const { meterAgentSeconds } = require("../billing/routes");
 
 const router = express.Router();
 
@@ -170,6 +171,13 @@ router.post("/plivo/:id/input", async (req, res) => {
 router.post("/plivo/:id/hangup", (req, res) => {
   const call = webhookGuard(req, res);
   if (!call) return;
+
+  // Meter REAL talk time against the user's plan (family pool included).
+  // BillDuration = seconds the answered leg lasted; 0 for unanswered.
+  const seconds = parseInt(req.body.BillDuration || req.body.Duration || "0", 10);
+  if (seconds > 0 && call.state !== "dialing") {
+    meterAgentSeconds(call.user_id, seconds);
+  }
   const cause = String(req.body.HangupCause || "").toUpperCase();
   const status = String(req.body.CallStatus || "").toLowerCase();
   const machine = /MACHINE/.test(cause);

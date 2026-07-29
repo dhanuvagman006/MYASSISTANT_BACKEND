@@ -26,7 +26,15 @@ if (process.env.NODE_ENV === "production" && process.env.AUTH_DISABLED === "true
 const app = express();
 app.set("trust proxy", 1);
 app.use(helmet());
-app.use(express.json({ limit: "2mb" }));
+app.use(
+  express.json({
+    limit: "2mb",
+    // Razorpay signs the RAW bytes — keep them for webhook verification.
+    verify: (req, _res, buf) => {
+      if (req.originalUrl === "/billing/webhook") req.rawBody = buf;
+    },
+  })
+);
 
 // Basic abuse protection: 60 requests/minute per IP
 app.use(rateLimit({ windowMs: 60_000, max: 60, standardHeaders: true }));
@@ -43,8 +51,28 @@ app.use(
   authRoute
 );
 
-// Chat requires the app key so strangers can't burn your AI credits
-app.use("/chat", appAuth, chatRoute);
+// BILLING — plans, Razorpay checkout + webhook, families. The webhook
+// is server-to-server from Razorpay (no app JWT) and is verified by
+// X-Razorpay-Signature inside the route instead.
+const billing = require("./billing/routes");
+app.use(
+  "/billing",
+  (req, res, next) => (req.path === "/webhook" ? next() : appAuth(req, res, next)),
+  billing.router
+);
+
+// PER-USER rate limit (on top of the per-IP one): a single hot account
+// can't drain the AI quota for everyone behind the same NAT/proxy.
+const perUserLimit = rateLimit({
+  windowMs: 60_000,
+  max: 30,
+  standardHeaders: true,
+  keyGenerator: (req) => String(req.user?.sub || req.ip),
+});
+
+// Chat requires the app key so strangers can't burn your AI credits.
+// Order: authenticate → per-user throttle → plan allowance → handler.
+app.use("/chat", appAuth, perUserLimit, billing.enforce("chat"), chatRoute);
 
 // Per-user memory management (list / add / forget) for the privacy screen.
 app.use("/memory", appAuth, require("./routes/memory"));
@@ -74,8 +102,15 @@ app.use(
   "/agent-call",
   (req, res, next) =>
     req.path.startsWith("/plivo/") ? next() : appAuth(req, res, next),
+  (req, res, next) =>
+    req.method === "POST" && req.path === "/"
+      ? billing.enforceAgentCall(req, res, next)
+      : next(),
   require("./agentcall/routes")
 );
+
+// ADMIN — read-only ops stats behind a static key (set ADMIN_KEY).
+app.use("/admin", require("./routes/admin"));
 
 // Live data for the Today screen (weather card, headlines).
 const wxTool = require("./services/tools/weather");
@@ -102,10 +137,10 @@ app.get("/tools/news", appAuth, async (req, res) => {
 });
 
 // Voice transcription (Whisper via Groq) — same auth as chat
-app.use("/stt", appAuth, sttRoute);
+app.use("/stt", appAuth, perUserLimit, billing.enforce("stt"), sttRoute);
 
 // Group B — photos, documents, OCR, screenshot helper (Gemini vision).
-app.use("/vision", appAuth, require("./routes/vision"));
+app.use("/vision", appAuth, perUserLimit, billing.enforce("vision"), require("./routes/vision"));
 
 // Group B+ — SAVED documents: hospital reports, receipts… Hari remembers
 // them and pulls them back up from a voice request (see routes/docs.js).

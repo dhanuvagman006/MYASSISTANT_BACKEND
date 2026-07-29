@@ -219,3 +219,45 @@ audio over WebSocket with no built-in STT/TTS (a much bigger build).
   contacts are not commercial telemarketing, and the agent discloses itself
   on every call; for scale, review TRAI AI-calling rules (disclosure,
   consent, number series).
+
+## Update — 29 July 2026 (2): Monetization + hardening
+**Billing (the money-maker):**
+- **`src/billing/plans.js`** — Free (20 chats/day, 5 vision, 10 docs, 0 agent
+  min) / Pro ₹249 (unlimited chat+STT, 50 vision, 100 docs, 30 agent min) /
+  Family ₹499 (Pro-level ×5 seats, 60 POOLED agent minutes). 31 days/payment.
+- **`src/billing/store.js`** — subscriptions, O(1) usage counters
+  (user,kind,period UPSERTs — tiny at any scale), families (invite codes,
+  seat caps, one-family-per-user), idempotent payments ledger, admin stats.
+  Effective plan: own sub → family owner's sub → free; expiry checked on
+  read (no cron). Agent minutes pool across the whole family, owner included.
+- **`src/billing/razorpay.js`** — PAYMENT LINKS (UPI/cards/netbanking; no
+  auto-debit mandate — app nudges renewal). Webhook verified by
+  X-Razorpay-Signature over the RAW body (captured via express.json verify
+  hook). Links expire in 30 min so stale prices can't be paid.
+- **`src/billing/routes.js`** — GET /billing (plan+usage+family), POST
+  /billing/checkout → hosted page URL, POST /billing/webhook
+  (payment_link.paid → activate/renew, idempotent, renewals extend from
+  expiry), family invite/join/leave. ENFORCEMENT middleware: 402
+  {code:"limit_reached"} with a ready-to-SPEAK upsell line; dev/X-App-Key
+  sessions never limited; /chat/greeting exempt.
+- **Wiring** — /chat, /stt, /vision metered per-day; /agent-call gated on
+  remaining minutes and metered from REAL BillDuration on the Plivo hangup
+  webhook; /docs upload capped by plan (docs.countDocuments).
+
+**Hardening:**
+- **Per-user rate limit** (30/min by account) on /chat and /stt on top of
+  the per-IP one — one hot account can't drain the AI quota for a NAT.
+- **`src/routes/admin.js`** — GET /admin/stats behind X-Admin-Key
+  (timing-safe; 404s while ADMIN_KEY unset — invisible). Counts only.
+- **`scripts/backup.sh`** — WAL-safe `VACUUM INTO` DB snapshot + document
+  files tarball, 14-archive retention; cron + ship to object storage.
+
+**Tests** — `scripts/billing-test.js` (in `npm test`, auth ON with real
+signed-up users): free limits visible, agent-call 402 for free, 20-then-402
+chat metering, webhook bad-sig 403 / good-sig activation, idempotent
+replays, renewal stacking, family invite→inherit, POOLED minute math,
+join validation, admin key gate. ALL PASSING (3 suites, 21+ checks).
+
+**Env additions**: RAZORPAY_KEY_ID / RAZORPAY_KEY_SECRET /
+RAZORPAY_WEBHOOK_SECRET (webhook URL: /billing/webhook, event
+payment_link.paid), ADMIN_KEY.
