@@ -8,11 +8,21 @@
 # (ETIMEDOUT) and adds minutes to every build. Slim is ~40 MB larger and
 # completely reliable; that is the right trade for a production API.
 
-# ---------- Stage 1: install deps (prebuilt, no toolchain needed) ----------
+# ---------- Stage 1: install deps ----------
 FROM node:20-slim AS builder
+
+# Toolchain as a FALLBACK: normally better-sqlite3's prebuilt binary just
+# downloads (fast path). But that download comes from GitHub Releases,
+# which some networks block/timeout — in that case node-gyp compiles the
+# module locally instead. npm_config_nodedir points gyp at the headers
+# already inside this image, so the compile needs NO downloads at all.
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends python3 make g++ \
+    && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
 COPY package.json package-lock.json ./
+ENV npm_config_nodedir=/usr/local
 RUN npm ci --omit=dev
 
 # ---------- Stage 2: runtime ----------
