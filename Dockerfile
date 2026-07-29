@@ -1,29 +1,28 @@
 # MYASSISTANT_BACKEND — place this file in the repo root
 #
-# Two-stage build: better-sqlite3 is a NATIVE module, so the builder stage
-# carries the C++ toolchain to compile it. The runtime stage copies the
-# compiled node_modules and stays small (no compilers shipped).
+# Base: node:20-slim (Debian/glibc), NOT alpine. Reason: better-sqlite3 is
+# a native module with PREBUILT binaries for glibc — on slim it installs
+# instantly with zero compilation. On alpine (musl) there is no prebuilt
+# binary, so node-gyp must compile from source AND download Node headers
+# from unofficial-builds.nodejs.org — which fails on flaky networks
+# (ETIMEDOUT) and adds minutes to every build. Slim is ~40 MB larger and
+# completely reliable; that is the right trade for a production API.
 
-# ---------- Stage 1: build native deps ----------
-FROM node:20-alpine AS builder
-
-# Toolchain for node-gyp (only exists in this stage).
-# py3-setuptools: newer alpine ships Python 3.12+ where distutils was
-# removed — without it node-gyp fails compiling better-sqlite3 with
-# "No module named 'distutils'".
-RUN apk add --no-cache python3 py3-setuptools make g++
+# ---------- Stage 1: install deps (prebuilt, no toolchain needed) ----------
+FROM node:20-slim AS builder
 
 WORKDIR /app
 COPY package.json package-lock.json ./
 RUN npm ci --omit=dev
 
 # ---------- Stage 2: runtime ----------
-FROM node:20-alpine
+FROM node:20-slim
 
 WORKDIR /app
 COPY --from=builder /app/node_modules ./node_modules
 COPY package.json ./
 COPY src ./src
+COPY scripts ./scripts
 
 # SQLite user DB lives here — mount a volume at /app/data to persist it.
 # Created before dropping root so the 'node' user can write to it.
@@ -36,8 +35,9 @@ USER node
 ENV NODE_ENV=production
 EXPOSE 3000
 
-# Basic container health check against the /health endpoint
+# Health check via node itself — slim ships no wget/curl, and adding one
+# just for this would grow the image.
 HEALTHCHECK --interval=30s --timeout=5s --retries=3 \
-  CMD wget -qO- http://localhost:3000/health || exit 1
+  CMD node -e "fetch('http://localhost:3000/health').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"
 
 CMD ["node", "src/server.js"]
