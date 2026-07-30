@@ -291,3 +291,17 @@ payment_link.paid), ADMIN_KEY.
   passing (unit conversion exactness, export redaction, delete finality +
   dead login, rules/preview, google endpoint validation & honest 409s,
   intent-layer honesty while unlinked).
+
+## Update — 30 July 2026 (2): Test-harness port fix + 45-feature audit
+- **Fixed flaky tests**: features-test and billing-test both hardcoded port 3778
+  (smoke 3999, agentcall 3777). A leftover listener made a suite silently talk to
+  the WRONG server ("memory seeding" ghost failure). All four suites now grab a
+  free ephemeral port via `scripts/_free-port.js`; verified passing when all four
+  run CONCURRENTLY.
+- **Audit vs the client's 45-feature list (Feature List PDF, 30 Jul)**:
+  DONE — all of Phase 1 (A1–A5, B1–B4, C1–C5, D1–D4, E1–E3, F1–F3) and
+  Phase 2 Group G (G1–G3 agent calls) + Swiggy ordering (extra, not in list).
+  NOT BUILT — H1–H4 (automation), I1–I3 (smart home), J1–J3 (WhatsApp/social),
+  K1–K4 (advisory: partially covered by chat, but no Account Aggregator, no
+  professional directory), L1–L3 (price tracking / assisted purchase / UPI),
+  M1 (offline model). These are the Months 5–9 items in the scope doc.

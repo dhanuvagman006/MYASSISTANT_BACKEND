@@ -10,7 +10,7 @@ process.env.JWT_SECRET = "x".repeat(48);
 process.env.AUTH_DISABLED = "false";
 process.env.ALLOW_APP_KEY = "false";
 process.env.DATA_DIR = "/tmp/billing-test-" + Date.now();
-process.env.PORT = "3778";
+// PORT is assigned dynamically in main() via scripts/_free-port.js
 process.env.RAZORPAY_KEY_ID = "rzp_test_x";
 process.env.RAZORPAY_KEY_SECRET = "secret";
 process.env.RAZORPAY_WEBHOOK_SECRET = "whsec_test";
@@ -20,7 +20,7 @@ delete process.env.GEMINI_API_KEY;
 
 const assert = require("assert");
 const crypto = require("crypto");
-const BASE = "http://localhost:3778";
+let BASE = ""; // set in main() once the port is known
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
 async function api(method, path, { body, token, headers = {}, raw } = {}) {
@@ -60,6 +60,9 @@ const sign = (raw) =>
   crypto.createHmac("sha256", "whsec_test").update(raw).digest("hex");
 
 async function main() {
+  const port = await require("./_free-port").freePort();
+  process.env.PORT = String(port);
+  BASE = `http://127.0.0.1:${port}`;
   require("../src/server");
   await sleep(500);
 

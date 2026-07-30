@@ -11,14 +11,14 @@
 process.env.JWT_SECRET = "x".repeat(48);
 process.env.AUTH_DISABLED = "true";
 process.env.DATA_DIR = "/tmp/agentcall-test-" + Date.now();
-process.env.PORT = "3777";
+// PORT is assigned dynamically in main() via scripts/_free-port.js
 process.env.PLIVO_VALIDATE = "false";
 delete process.env.GROQ_API_KEY;
 delete process.env.GEMINI_API_KEY;
 delete process.env.PLIVO_AUTH_ID; // start UNconfigured for the 503 test
 
 const assert = require("assert");
-const BASE = "http://localhost:3777";
+let BASE = ""; // set in main() once the port is known
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
@@ -41,7 +41,10 @@ async function post(path, body, form = false) {
 }
 
 async function main() {
-  require("../src/server"); // boots on :3777
+  const port = await require("./_free-port").freePort();
+  process.env.PORT = String(port);
+  BASE = `http://127.0.0.1:${port}`;
+  require("../src/server");
   await sleep(500);
 
   // 1) Unconfigured → clean 503, not a crash.

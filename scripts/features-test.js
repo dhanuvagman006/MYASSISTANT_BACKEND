@@ -12,13 +12,13 @@ process.env.JWT_SECRET = "x".repeat(48);
 process.env.AUTH_DISABLED = "false";
 process.env.APP_API_KEY = "";
 process.env.DATA_DIR = "/tmp/features-test-" + Date.now();
-process.env.PORT = "3778";
+// PORT is assigned dynamically in main() via scripts/_free-port.js
 delete process.env.GROQ_API_KEY;
 delete process.env.GEMINI_API_KEY;
 delete process.env.PLIVO_AUTH_ID;
 
 const assert = require("assert");
-const BASE = "http://localhost:3778";
+let BASE = ""; // set in main() once the port is known
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
 async function req(method, path, { body, token, headers = {} } = {}) {
@@ -47,6 +47,9 @@ async function signup(email) {
 }
 
 async function main() {
+  const port = await require("./_free-port").freePort();
+  process.env.PORT = String(port);
+  BASE = `http://127.0.0.1:${port}`;
   require("../src/server");
   await sleep(500);
 
