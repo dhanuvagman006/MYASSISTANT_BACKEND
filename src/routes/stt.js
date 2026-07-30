@@ -20,6 +20,33 @@ const upload = multer({
   limits: { fileSize: 6 * 1024 * 1024 }, // ~15s of AAC is far below this
 });
 
+// ---------------- HALLUCINATION GUARD ----------------
+// On silence / faint background noise Whisper famously invents YouTube
+// filler ("Welcome to my channel…", "Thanks for watching") and loops
+// short phrases ("1 cup of milk. 1 cup of flour. 1 cup of milk…").
+// Returning that as "heard" text is worse than returning nothing.
+const HALLUCINATION_RX =
+  /welcome to my channel|thank(s| you) for watching|please subscribe|like,? share,? (and )?subscribe|don'?t forget to (like|subscribe)|see you in the next video|字幕|ご視聴ありがとう/i;
+
+function sanitizeTranscript(raw) {
+  const t = String(raw || "").trim();
+  if (!t) return "";
+  if (HALLUCINATION_RX.test(t)) return "";
+  // Looping detection: split into phrases; if one phrase dominates by
+  // repeating, the whole clip was noise.
+  const parts = t
+    .split(/(?<=[.!?।|])\s+|\n+/)
+    .map((p) => p.trim().toLowerCase().replace(/[^\p{L}\p{N} ]/gu, ""))
+    .filter(Boolean);
+  if (parts.length >= 4) {
+    const counts = new Map();
+    for (const p of parts) counts.set(p, (counts.get(p) || 0) + 1);
+    const max = Math.max(...counts.values());
+    if (max >= 3 && max / parts.length >= 0.4) return "";
+  }
+  return t;
+}
+
 // Whisper misdetects Kannada/Telugu/etc. as Hindi on short clips (heavy
 // shared Sanskrit vocabulary). Two counters, sent by the app:
 //   language=kn  -> FORCE that language (user picked it in the app)
@@ -127,6 +154,7 @@ router.post("/", upload.single("audio"), async (req, res) => {
   if (sarvamKey) {
     try {
       const out = await sarvamTranscribe(sarvamKey, req.file, { language, hint });
+      out.text = sanitizeTranscript(out.text);
       if (out.text) return res.json({ ...out, provider: "sarvam" });
       // Empty transcript: fall through to Whisper (may be a non-Indian
       // language Saaras doesn't cover).
@@ -149,8 +177,17 @@ router.post("/", upload.single("audio"), async (req, res) => {
       return res.status(502).json({ error: "transcription failed" });
     }
     const data = await r.json();
+    // verbose_json gives per-segment no_speech_prob — drop segments the
+    // model itself thinks are silence before they become hallucinations.
+    let text = data.text || "";
+    if (Array.isArray(data.segments) && data.segments.length) {
+      text = data.segments
+        .filter((s) => (s.no_speech_prob ?? 0) < 0.6)
+        .map((s) => s.text || "")
+        .join(" ");
+    }
     res.json({
-      text: (data.text || "").trim(),
+      text: sanitizeTranscript(text),
       language: data.language || "unknown",
       provider: "groq-whisper",
     });

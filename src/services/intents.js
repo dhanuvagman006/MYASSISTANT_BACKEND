@@ -43,7 +43,7 @@ const RE = {
   docRecall:
     /\b(reports?|documents?|prescriptions?|receipts?|recipes?|records?|scan|photocopy|test results?|x-?rays?|lab (results?|reports?)|medical (file|history)|bill|invoice)\b|\b(doctor|hospital|clinic)\b.{0,40}\b(said|told|suggested|suggestions?|advice|advised|gave|prescribed|recommend\w*)\b|\b(said|told|suggested|suggestions?|advice|advised|gave|prescribed|recommend\w*)\b.{0,40}\b(doctor|hospital|clinic)\b/i,
   foodOrder:
-    /\b(order|get|bring|deliver|book)\b.{0,40}\b(food|pizza|biryani|burger|dosa|idli|noodles|momos|thali|shawarma|rolls?|sandwich|cake|ice ?cream|meals?|dinner|lunch|breakfast|snacks?)\b|\bswiggy\b.{0,30}\border\b|\border\b.{0,30}\bswiggy\b|\bi('| a)?m (really |so |very )?hungry\b/i,
+    /\b(order|get|bring|deliver|book)\b.{0,40}\b(food|pizza|biryani|burger|dosa|idli|noodles|momos|thali|shawarma|rolls?|sandwich|cake|ice ?cream|meals?|dinner|lunch|breakfast|snacks?)\b|\bswiggy\b.{0,30}\border\b|\border\b.{0,30}\bswiggy\b|\bswiggy\b.{0,60}\b(food|pizza|biryani|burger|dosa|idli|noodles|momos|thali|shawarma|rolls?|sandwich|cake|ice ?cream|meals?|dinner|lunch|breakfast|snacks?)\b|\b(food|pizza|biryani|burger|dosa|idli|noodles|momos|thali|shawarma|rolls?|sandwich|cake|ice ?cream|meals?|dinner|lunch|breakfast|snacks?)\b.{0,60}\bswiggy\b|\bi('| a)?m (really |so |very )?hungry\b/i,
   yes: /^\s*(yes|yeah|yep|ya|sure|ok(ay)?|confirm|place (it|the order)|go ahead|do it|haan|ho|houdu|sari|ஆமாம்|హా|हाँ|ಹೌದು)[.! ]*$/i,
   no: /^\s*(no|nope|nah|cancel|don'?t|stop|leave it|beda|nako|nahi|नहीं|ಬೇಡ|வேண்டாம்|వద్దు)[.! ]*$/i,
 };
@@ -52,6 +52,7 @@ const RE = {
 function extractCraving(msg) {
   let s = norm(msg)
     .replace(/\b(hey|hi|ok(ay)?|please|pls|can you|could you|will you|for me|right now|now|today|tonight|on|from|via|using|swiggy)\b/g, " ")
+    .replace(/\b(find|search|show|suggest|recommend|best|good|top|near ?(me|by)?|nearby|around|here)\b/g, " ")
     .replace(/\b(order|get|bring|deliver|book|buy|want|need|i|am|is|a|an|some|the|my|me)\b/g, " ")
     .replace(/[^\p{L}\p{N} ]/gu, " ")
     .replace(/\s{2,}/g, " ")
@@ -89,7 +90,11 @@ function parseReminder(msg, now, tzOffsetMin) {
  */
 async function buildToolContext({ userId, messages, tzOffsetMin = 330, lat, lng }) {
   const lastUser = [...(messages || [])].reverse().find((m) => m.role === "user");
-  const msg = lastUser ? String(lastUser.content || "") : "";
+  // STT regularly mishears the brand: "Spiggy", "Sviggy", "Swigi",
+  // "Swiggie"… canonicalize before any intent regex runs so a misheard
+  // brand still routes to the Swiggy flow instead of generic search.
+  const msg = (lastUser ? String(lastUser.content || "") : "")
+    .replace(/\bs[pvw]ig+[iy]e?\b/gi, "swiggy");
   const now = new Date();
 
   // Assistants must know the clock. Rendered in the user's timezone.
