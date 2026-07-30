@@ -9,8 +9,8 @@ const path = require("path");
 const fs = require("fs");
 const os = require("os");
 
-const PORT = 3999;
-const BASE = `http://127.0.0.1:${PORT}`;
+let PORT = 0; // assigned in main() via scripts/_free-port.js
+let BASE = "";
 
 async function req(method, url, { body, token } = {}) {
   const r = await fetch(BASE + url, {
@@ -31,6 +31,8 @@ function assert(cond, msg) {
 }
 
 async function main() {
+  PORT = await require("./_free-port").freePort();
+  BASE = `http://127.0.0.1:${PORT}`;
   const dataDir = fs.mkdtempSync(path.join(os.tmpdir(), "ma-smoke-"));
   const server = spawn(process.execPath, ["src/server.js"], {
     env: {
@@ -38,6 +40,7 @@ async function main() {
       PORT: String(PORT),
       DATA_DIR: dataDir,
       JWT_SECRET: "smoke-test-secret-smoke-test-secret-123",
+      AUTH_DISABLED: "false", // a local dev .env must never break the suite
       GROQ_API_KEY: "", GEMINI_API_KEY: "", SARVAM_API_KEY: "",
     },
     stdio: ["ignore", "pipe", "pipe"],
