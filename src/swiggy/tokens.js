@@ -69,6 +69,18 @@ const REDIRECT = () => {
   return "http://localhost:3000/swiggy/callback";
 };
 const TIMEOUT = 10_000;
+
+// Refresh tokens are only issued when the client asks for offline_access;
+// without it Swiggy returned only a short-lived access token and the link
+// died with "no refresh token returned". Request it unless the server's
+// metadata explicitly says it's unsupported.
+const BASE_SCOPES = "mcp:tools mcp:resources mcp:prompts";
+async function scopeString() {
+  const meta = await metadata();
+  const supported = meta.scopes_supported;
+  const offline = !Array.isArray(supported) || supported.includes("offline_access");
+  return offline ? `${BASE_SCOPES} offline_access` : BASE_SCOPES;
+}
 const b64url = (buf) => buf.toString("base64").replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
 
 async function jfetch(url, opts = {}) {
@@ -97,10 +109,12 @@ async function metadata() {
 
 // ---- Dynamic Client Registration (once, persisted in kv) ----
 async function clientReg() {
+  const scope = await scopeString();
   const row = stmts.kvGet.get("swiggy_client");
   if (row) {
     const c = JSON.parse(row.v);
-    if (c.redirect_uris?.includes(REDIRECT())) return c;
+    // Re-register when the redirect or requested scopes changed.
+    if (c.redirect_uris?.includes(REDIRECT()) && c._requested_scope === scope) return c;
   }
   const meta = await metadata();
   if (!meta.registration_endpoint) throw new Error("swiggy: no registration endpoint");
@@ -113,9 +127,10 @@ async function clientReg() {
       grant_types: ["authorization_code", "refresh_token"],
       response_types: ["code"],
       token_endpoint_auth_method: "none", // public client + PKCE
-      scope: "mcp:tools mcp:resources mcp:prompts",
+      scope,
     }),
   });
+  c._requested_scope = scope; // our fingerprint, not part of the server reply
   stmts.kvSet.run("swiggy_client", JSON.stringify(c));
   return c;
 }
@@ -165,7 +180,7 @@ async function beginLink(userId) {
   u.searchParams.set("response_type", "code");
   u.searchParams.set("client_id", client.client_id);
   u.searchParams.set("redirect_uri", REDIRECT());
-  u.searchParams.set("scope", "mcp:tools mcp:resources mcp:prompts");
+  u.searchParams.set("scope", await scopeString());
   u.searchParams.set("state", state);
   u.searchParams.set("code_challenge", b64url(crypto.createHash("sha256").update(verifier).digest()));
   u.searchParams.set("code_challenge_method", "S256");
@@ -188,10 +203,13 @@ async function completeLink(state, code) {
       code_verifier: p.verifier,
     }).toString(),
   });
-  if (!t.refresh_token) throw new Error("swiggy: no refresh token returned");
+  // Prefer a refresh token, but if the server still won't grant one,
+  // an access-token-only link is better than no link: store it with an
+  // empty refresh token and let accessToken() serve it until expiry.
+  if (!t.refresh_token && !t.access_token) throw new Error("swiggy: no tokens returned");
   stmts.upsert.run({
     user_id: p.userId,
-    refresh_token: t.refresh_token,
+    refresh_token: t.refresh_token || "",
     access_token: t.access_token || null,
     expires_at: t.expires_in ? Date.now() + t.expires_in * 1000 : null,
     updated_at: Date.now(),
@@ -213,6 +231,13 @@ async function accessToken(userId) {
   if (!row) return null;
   if (row.access_token && row.expires_at && row.expires_at - Date.now() > 60_000) {
     return row.access_token;
+  }
+  // Access-token-only link (no refresh token granted): once it expires
+  // there is nothing to refresh with — drop the row so /status shows
+  // "not linked" and the user re-links instead of getting silent 401s.
+  if (!row.refresh_token) {
+    stmts.del.run(userId);
+    return null;
   }
   const [meta, client] = await Promise.all([metadata(), clientReg()]);
   const t = await jfetch(meta.token_endpoint, {
