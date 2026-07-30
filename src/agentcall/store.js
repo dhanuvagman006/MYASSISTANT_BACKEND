@@ -58,6 +58,61 @@ const stmts = {
   ),
 };
 
+db.exec(`
+  CREATE TABLE IF NOT EXISTS agent_call_settings (
+    user_id     TEXT PRIMARY KEY,
+    enabled     INTEGER NOT NULL DEFAULT 1,
+    daily_limit INTEGER NOT NULL DEFAULT 10,   -- calls per local day
+    hours_start INTEGER NOT NULL DEFAULT 8,    -- earliest local hour
+    hours_end   INTEGER NOT NULL DEFAULT 21    -- latest local hour (exclusive)
+  );
+`);
+
+const DEFAULT_SETTINGS = { enabled: 1, daily_limit: 10, hours_start: 8, hours_end: 21 };
+
+/** G2 — the user's calling rules (defaults until they change them). */
+function getSettings(userId) {
+  const row = db
+    .prepare("SELECT * FROM agent_call_settings WHERE user_id = ?")
+    .get(String(userId));
+  return row || { user_id: String(userId), ...DEFAULT_SETTINGS };
+}
+
+function setSettings(userId, patch) {
+  const cur = getSettings(userId);
+  const next = {
+    enabled: patch.enabled === undefined ? cur.enabled : patch.enabled ? 1 : 0,
+    daily_limit: clampInt(patch.daily_limit, 0, 50, cur.daily_limit),
+    hours_start: clampInt(patch.hours_start, 0, 23, cur.hours_start),
+    hours_end: clampInt(patch.hours_end, 1, 24, cur.hours_end),
+  };
+  db.prepare(`
+    INSERT INTO agent_call_settings (user_id, enabled, daily_limit, hours_start, hours_end)
+    VALUES (@uid, @enabled, @daily_limit, @hours_start, @hours_end)
+    ON CONFLICT(user_id) DO UPDATE SET
+      enabled=@enabled, daily_limit=@daily_limit,
+      hours_start=@hours_start, hours_end=@hours_end
+  `).run({ uid: String(userId), ...next });
+  return getSettings(userId);
+}
+
+function clampInt(v, min, max, dflt) {
+  const n = Number(v);
+  if (!Number.isInteger(n)) return dflt;
+  return Math.max(min, Math.min(max, n));
+}
+
+/** Calls placed since the user's local midnight (tzOffset minutes east of UTC). */
+function countToday(userId, tzOffsetMin = 330) {
+  const nowLocal = Date.now() + tzOffsetMin * 60_000;
+  const midnightUtc = Math.floor(nowLocal / 864e5) * 864e5 - tzOffsetMin * 60_000;
+  return db
+    .prepare(
+      "SELECT COUNT(*) AS n FROM agent_calls WHERE user_id = ? AND created_at >= ? AND state != 'blocked'"
+    )
+    .get(String(userId), midnightUtc).n;
+}
+
 function create({ userId, contactName, toNumber, task, lang }) {
   const id = crypto.randomBytes(16).toString("hex");
   stmts.insert.run({
@@ -113,4 +168,5 @@ function setResult(id, result, state = "completed") {
 const DONE = new Set(["completed", "no_answer", "failed"]);
 const isDone = (state) => DONE.has(state);
 
-module.exports = { create, get, setState, setProviderId, addTurn, setResult, isDone };
+module.exports = {
+  getSettings, setSettings, countToday, create, get, setState, setProviderId, addTurn, setResult, isDone };

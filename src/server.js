@@ -77,6 +77,9 @@ app.use("/chat", appAuth, perUserLimit, billing.enforce("chat"), chatRoute);
 // Per-user memory management (list / add / forget) for the privacy screen.
 app.use("/memory", appAuth, require("./routes/memory"));
 
+// Privacy dashboard (F2): full data export + permanent account deletion.
+app.use("/privacy", appAuth, require("./routes/privacy"));
+
 // Google account link: Gmail + Calendar (read-only).
 app.use("/google", appAuth, require("./google/routes"));
 

@@ -33,6 +33,74 @@ router.use(express.urlencoded({ extended: false }));
 
 // ---------------- app-facing ----------------
 
+// ---- G2: the user's calling rules ----
+router.get("/settings", (req, res) => {
+  const st = store.getSettings(req.user.sub);
+  res.json({
+    enabled: !!st.enabled,
+    dailyLimit: st.daily_limit,
+    hoursStart: st.hours_start,
+    hoursEnd: st.hours_end,
+    usedToday: store.countToday(req.user.sub, tz(req)),
+  });
+});
+
+router.put("/settings", (req, res) => {
+  const b = req.body || {};
+  const st = store.setSettings(req.user.sub, {
+    enabled: b.enabled,
+    daily_limit: b.dailyLimit,
+    hours_start: b.hoursStart,
+    hours_end: b.hoursEnd,
+  });
+  res.json({
+    enabled: !!st.enabled,
+    dailyLimit: st.daily_limit,
+    hoursStart: st.hours_start,
+    hoursEnd: st.hours_end,
+  });
+});
+
+/** G2 — PREVIEW: exactly what Hari will say when the contact answers.
+ *  Nothing is dialed; the app speaks this and asks for approval. */
+router.post("/preview", async (req, res) => {
+  const { contactName, task, lang } = req.body || {};
+  const name = String(contactName || "").trim().slice(0, 80);
+  const what = String(task || "").trim().slice(0, 500);
+  if (!name || !what) {
+    return res.status(400).json({ error: "contactName and task required" });
+  }
+  const rule = checkRules(req);
+  const user = findById(Number(req.user.sub));
+  const opening = await engine.openingLine(
+    { contact_name: name, task: what, lang: String(lang || "en-IN") },
+    user?.name
+  );
+  res.json({ opening, allowed: !rule, reason: rule || null });
+});
+
+const tz = (req) => {
+  const n = Number(req.get("x-tz-offset"));
+  return Number.isFinite(n) ? n : 330;
+};
+
+/** null when the call may proceed; else a ready-to-speak refusal. */
+function checkRules(req) {
+  const st = store.getSettings(req.user.sub);
+  if (!st.enabled) {
+    return "AI calling is switched off in your call settings.";
+  }
+  const t = tz(req);
+  const hour = Math.floor(((Date.now() + t * 60_000) % 864e5) / 36e5);
+  if (hour < st.hours_start || hour >= st.hours_end) {
+    return `Your call rules only allow calls between ${st.hours_start}:00 and ${st.hours_end}:00 — I'll hold off.`;
+  }
+  if (store.countToday(req.user.sub, t) >= st.daily_limit) {
+    return `You've reached your daily limit of ${st.daily_limit} AI calls. You can raise it in call settings.`;
+  }
+  return null;
+}
+
 router.post("/", async (req, res) => {
   if (!plivo.configured()) {
     return res.status(503).json({
@@ -40,6 +108,10 @@ router.post("/", async (req, res) => {
         "agent calling not configured — set PLIVO_AUTH_ID, " +
         "PLIVO_AUTH_TOKEN, PLIVO_FROM_NUMBER and PUBLIC_BASE_URL",
     });
+  }
+  const ruleBlock = checkRules(req); // G2 — user-set limits, hours, master switch
+  if (ruleBlock) {
+    return res.status(403).json({ error: "call_rules", say: ruleBlock });
   }
   const { toNumber, contactName, task, lang } = req.body || {};
   const to = plivo.toE164(toNumber);

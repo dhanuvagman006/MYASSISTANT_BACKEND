@@ -75,4 +75,83 @@ router.get("/calendar", async (req, res) => {
   }
 });
 
+// ---------- WRITE endpoints (D2 · D3 · D4) ----------
+
+/** D3 — create a calendar event (the app shows a preview and the user
+ *  approves BEFORE calling this; voice creation confirms by speech). */
+router.post("/event", async (req, res) => {
+  const id = uid(req, res);
+  if (id === null) return;
+  const { title, startMs, endMs, location, description } = req.body || {};
+  const start = Number(startMs);
+  if (!title || !Number.isFinite(start)) {
+    return res.status(400).json({ error: "title and startMs required" });
+  }
+  try {
+    const ev = await gapi.createEvent(id, {
+      title, startMs: start,
+      endMs: Number(endMs) || undefined,
+      location, description,
+    });
+    if (ev === null) return res.status(409).json({ error: "not linked" });
+    res.status(201).json({ event: ev });
+  } catch (e) {
+    const scope = /scope/.test(e.message);
+    res.status(scope ? 403 : 502).json({
+      error: scope
+        ? "calendar write permission missing — reconnect Google"
+        : "calendar unavailable",
+    });
+  }
+});
+
+/** D2 — save a REPLY DRAFT for a message (never sends). */
+router.post("/draft", async (req, res) => {
+  const id = uid(req, res);
+  if (id === null) return;
+  const { messageId, to, subject, body } = req.body || {};
+  if (!body || (!messageId && !to)) {
+    return res.status(400).json({ error: "body plus messageId or to required" });
+  }
+  try {
+    let payload = { to, subject: subject || "(no subject)", body };
+    if (messageId) {
+      const meta = await gapi.messageMeta(id, String(messageId));
+      if (meta === null) return res.status(409).json({ error: "not linked" });
+      if (!meta) return res.status(404).json({ error: "message not found" });
+      payload = {
+        to: meta.replyTo || meta.fromEmail,
+        subject: /^re:/i.test(meta.subject) ? meta.subject : "Re: " + meta.subject,
+        body,
+        threadId: meta.threadId,
+        inReplyTo: meta.messageId,
+      };
+    }
+    const draft = await gapi.createDraft(id, payload);
+    if (draft === null) return res.status(409).json({ error: "not linked" });
+    res.status(201).json({ draft });
+  } catch (e) {
+    const scope = /scope/.test(e.message);
+    res.status(scope ? 403 : 502).json({
+      error: scope
+        ? "gmail draft permission missing — reconnect Google"
+        : "gmail unavailable",
+    });
+  }
+});
+
+/** D4 — meeting preparation card: next event + recent emails from the
+ *  same participants. The Today screen renders this before the event. */
+router.get("/meeting-prep", async (req, res) => {
+  const id = uid(req, res);
+  if (id === null) return;
+  try {
+    const prep = await gapi.meetingPrep(id);
+    if (prep === null) return res.status(409).json({ error: "not linked" });
+    res.json(prep);
+  } catch (e) {
+    res.status(502).json({ error: "google unavailable" });
+  }
+});
+
 module.exports = router;

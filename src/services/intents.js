@@ -16,9 +16,11 @@
  *    minutes east of UTC, i.e. IST = 330).
  */
 const chrono = require("chrono-node");
+const { generateReply } = require("./ai/router");
 const weather = require("./tools/weather");
 const places = require("./tools/places");
 const currency = require("./tools/currency");
+const units = require("./tools/units");
 const news = require("./tools/news");
 const reminders = require("../reminders/store");
 const memory = require("../memory/store");
@@ -44,6 +46,12 @@ const RE = {
     /\b(reports?|documents?|prescriptions?|receipts?|recipes?|records?|scan|photocopy|test results?|x-?rays?|lab (results?|reports?)|medical (file|history)|bill|invoice)\b|\b(doctor|hospital|clinic)\b.{0,40}\b(said|told|suggested|suggestions?|advice|advised|gave|prescribed|recommend\w*)\b|\b(said|told|suggested|suggestions?|advice|advised|gave|prescribed|recommend\w*)\b.{0,40}\b(doctor|hospital|clinic)\b/i,
   foodOrder:
     /\b(order|get|bring|deliver|book)\b.{0,40}\b(food|pizza|biryani|burger|dosa|idli|noodles|momos|thali|shawarma|rolls?|sandwich|cake|ice ?cream|meals?|dinner|lunch|breakfast|snacks?)\b|\bswiggy\b.{0,30}\border\b|\border\b.{0,30}\bswiggy\b|\bswiggy\b.{0,60}\b(food|pizza|biryani|burger|dosa|idli|noodles|momos|thali|shawarma|rolls?|sandwich|cake|ice ?cream|meals?|dinner|lunch|breakfast|snacks?)\b|\b(food|pizza|biryani|burger|dosa|idli|noodles|momos|thali|shawarma|rolls?|sandwich|cake|ice ?cream|meals?|dinner|lunch|breakfast|snacks?)\b.{0,60}\bswiggy\b|\b(order|get|bring|deliver|book)\b.{0,25}\b(something|anything)( else| to eat| to drink)?\b|\bi('| a)?m (really |so |very )?hungry\b/i,
+  calCreate:
+    /\b(schedule|create|add|put|set ?up|book|arrange|fix)\b.{0,40}\b(meeting|event|appointment|call)\b|\b(meeting|event|appointment)\b.{0,30}\b(schedule|create|add|put|book)\b|\badd (it |this )?to (my )?calendar\b/i,
+  draftReply:
+    /\b(draft|write|prepare|compose)\b.{0,30}\b(reply|response|answer)\b|\breply to\b.{0,40}\b(email|mail|message)\b|\b(email|mail)\b.{0,20}\breply\b/i,
+  meetingPrep:
+    /\b(prep(are)?( me)?|brief me|get me ready|what do i need)\b.{0,30}\b(meeting|call|event)\b|\bnext meeting\b.{0,20}\b(about|prep|ready|details)\b|\bmeeting prep\b/i,
   yes: /^\s*(yes|yeah|yep|ya|sure|ok(ay)?|confirm|place (it|the order)|go ahead|do it|haan|ho|houdu|sari|ஆமாம்|హా|हाँ|ಹೌದು)[.! ]*$/i,
   no: /^\s*(no|nope|nah|cancel|don'?t|stop|leave it|beda|nako|nahi|नहीं|ಬೇಡ|வேண்டாம்|వద్దు)[.! ]*$/i,
 };
@@ -85,6 +93,43 @@ function parseReminder(msg, now, tzOffsetMin) {
   return { text, dueAt };
 }
 
+
+/**
+ * D3 — pending calendar-event confirmations. Hari SPEAKS a preview
+ * ("Tuesday 5 pm, 'Dentist' — shall I add it?"); the next "yes" creates
+ * the real event, "no" discards. In-memory with a 2-minute TTL (same
+ * pattern as the Swiggy confirm). NOTE for horizontal scale: move this
+ * Map to Redis when the API runs on more than one node.
+ */
+const pendingEvents = new Map(); // see note above // userId -> { title, startMs, endMs, expires }
+const EVENT_TTL = 2 * 60_000;
+function getPendingEvent(userId) {
+  const p = pendingEvents.get(userId);
+  if (!p) return null;
+  if (Date.now() > p.expires) { pendingEvents.delete(userId); return null; }
+  return p;
+}
+
+/** "schedule a dentist appointment tomorrow at 5 pm" → {title,startMs,endMs} */
+function parseEventAsk(msg, now, tzOffsetMin) {
+  const ref = { instant: now, timezone: tzOffsetMin };
+  const results = chrono.parse(msg, ref, { forwardDate: true });
+  if (results.length === 0) return null;
+  const r = results[results.length - 1];
+  if (!r.start.isCertain("hour")) return { needTime: true };
+  const startMs = r.start.date().getTime();
+  const endMs = r.end ? r.end.date().getTime() : startMs + 36e5;
+  let title = (msg.slice(0, r.index) + " " + msg.slice(r.index + r.text.length))
+    .replace(RE.calCreate, " ")
+    .replace(/\b(a|an|the|my|for|on|at|in|to|please|pls|hey|hari|calendar|with)\b/gi, " ")
+    .replace(/[^\p{L}\p{N} ]/gu, " ")
+    .replace(/\s{2,}/g, " ")
+    .trim();
+  if (!title) title = "Event";
+  title = title.charAt(0).toUpperCase() + title.slice(1);
+  return { title: title.slice(0, 120), startMs, endMs };
+}
+
 /**
  * @returns {Promise<string>} extra system-prompt block ("" when no intent)
  */
@@ -115,6 +160,36 @@ async function buildToolContext({ userId, messages, tzOffsetMin = 330, lat, lng 
       // ---- FOOD ORDER (Swiggy MCP) — checked FIRST because a bare
       // "yes"/"no" is meaningless to every other intent. Real money:
       // the flow is deterministic and two-turn; the AI only phrases it. ----
+      // ---- CALENDAR EVENT CONFIRM (D3) — a bare yes/no resolves a spoken
+      // event preview. Deterministic write; the AI only phrases the result. ----
+      if (userId && getPendingEvent(userId) && (RE.yes.test(msg) || RE.no.test(msg))) {
+        const p = getPendingEvent(userId);
+        pendingEvents.delete(userId);
+        if (RE.no.test(msg)) {
+          blocks.push("TOOL RESULT — CALENDAR: the user declined; NO event was created. Acknowledge briefly.");
+        } else {
+          try {
+            const ev = await gapi.createEvent(userId, p);
+            const local = new Date(p.startMs + tzOffsetMin * 60_000)
+              .toISOString().replace("T", " ").slice(0, 16);
+            blocks.push(
+              ev
+                ? `TOOL RESULT — CALENDAR: event "${p.title}" WAS CREATED for ${local} (user's local time). Confirm it back in one short sentence.`
+                : "TOOL RESULT — CALENDAR: Google is not linked, so NO event was created. Point them to Today tab → Inbox → Connect."
+            );
+          } catch (e) {
+            blocks.push(
+              "TOOL RESULT — CALENDAR: creating the event FAILED (" +
+                (/scope/.test(e.message)
+                  ? "the calendar write permission is missing — ask them to reconnect Google from the You tab"
+                  : "Google Calendar is unreachable right now") +
+                "). NO event exists; never claim it was created."
+            );
+          }
+        }
+        return { block: "\n\n" + blocks.join("\n\n"), sources, documents };
+      }
+
       if (userId && food.hasPending(userId) && (RE.yes.test(msg) || RE.no.test(msg))) {
         const r = RE.yes.test(msg)
           ? await food.confirmPending(userId)
@@ -194,6 +269,138 @@ async function buildToolContext({ userId, messages, tzOffsetMin = 330, lat, lng 
               " Answer the user's weather question from this real data only."
           );
           sources.push({ name: "Open-Meteo" + (w?.label ? ` · ${w.label}` : ""), url: "https://open-meteo.com" });
+        }
+      }
+
+      // ---- CALENDAR: CREATE BY VOICE (D3) — preview first, then confirm ----
+      if (userId && RE.calCreate.test(msg) && !RE.remindSet.test(msg)) {
+        if (!gtokens.isConnected(userId)) {
+          blocks.push(
+            "TOOL RESULT — CALENDAR: the user wants to create an event but Google " +
+              "is NOT connected. Point them to Today tab → Inbox → Connect. Do not pretend."
+          );
+        } else {
+          const p = parseEventAsk(msg, now, tzOffsetMin);
+          if (!p || p.needTime) {
+            blocks.push(
+              "TOOL RESULT — CALENDAR: the user wants to create an event but gave no clear " +
+                "date AND time. Ask them in one short sentence for the day and time. Do NOT create anything yet."
+            );
+          } else {
+            pendingEvents.set(userId, { ...p, expires: Date.now() + EVENT_TTL });
+            const local = new Date(p.startMs + tzOffsetMin * 60_000)
+              .toISOString().replace("T", " ").slice(0, 16);
+            blocks.push(
+              `TOOL RESULT — CALENDAR PREVIEW (nothing created yet): "${p.title}" on ${local} (user's local time). ` +
+                "Read this preview back in one short sentence and ask for a yes/no to add it. " +
+                "Only a yes will create it; do not claim it exists yet."
+            );
+          }
+        }
+        return { block: "\n\n" + blocks.join("\n\n"), sources, documents };
+      }
+
+      // ---- GMAIL: DRAFT A REPLY (D2) — saves a Gmail draft, NEVER sends ----
+      if (userId && RE.draftReply.test(msg)) {
+        if (!gtokens.isConnected(userId)) {
+          blocks.push(
+            "TOOL RESULT — GMAIL: the user wants a reply drafted but Gmail is NOT connected. " +
+              "Point them to Today tab → Inbox → Connect."
+          );
+          return { block: "\n\n" + blocks.join("\n\n"), sources, documents };
+        }
+        try {
+          const emails = (await gapi.recentEmails(userId, { max: 8 })) || [];
+          // "reply to Ramesh's email" — match a sender name if one is spoken
+          const nameM = msg.match(/reply to ([\p{L} .'-]{2,40}?)(?:'s)?\s*(?:email|mail|message)/iu);
+          const target = nameM
+            ? emails.find((e) => e.from.toLowerCase().includes(nameM[1].trim().toLowerCase()))
+            : emails.find((e) => e.unread) || emails[0];
+          if (!target) {
+            blocks.push("TOOL RESULT — GMAIL: no recent email found to reply to. Say so briefly.");
+          } else {
+            // Compose the body with ONE dedicated AI call (clean email text,
+            // not TTS-flavoured chat), then save the draft DETERMINISTICALLY
+            // here — the main AI only announces the result and can never
+            // claim a draft that doesn't exist.
+            let body = "";
+            try {
+              const { reply } = await generateReply(
+                [{ role: "user",
+                   content:
+                     `Write ONLY the plain-text body of a brief, polite reply email. ` +
+                     `No subject line, no markdown, no commentary before or after.\n` +
+                     `Original email — From ${target.from}: "${target.subject}" — ${target.snippet}\n` +
+                     `What the user wants the reply to say: ${msg}` }],
+                { extraSystem: "You write email bodies. Output the email text and nothing else." }
+              );
+              body = String(reply || "").trim();
+            } catch (_) {}
+            if (!body) {
+              blocks.push("TOOL RESULT — GMAIL: the reply could not be composed right now; NO draft was saved. Apologize briefly.");
+            } else {
+              try {
+                const meta = await gapi.messageMeta(userId, target.id);
+                await gapi.createDraft(userId, {
+                  to: meta?.replyTo || meta?.fromEmail || undefined,
+                  subject: meta ? (/^re:/i.test(meta.subject) ? meta.subject : "Re: " + meta.subject) : "Re: " + target.subject,
+                  body,
+                  threadId: meta?.threadId,
+                  inReplyTo: meta?.messageId,
+                });
+                blocks.push(
+                  `TOOL RESULT — GMAIL: a reply DRAFT to ${target.from} WAS SAVED in the user's Gmail (not sent — they review and send it). ` +
+                    `The draft says:\n${body.slice(0, 600)}\n` +
+                    "Read the gist back in one or two sentences and remind them it's waiting in Gmail drafts."
+                );
+              } catch (e) {
+                blocks.push(
+                  "TOOL RESULT — GMAIL: saving the draft FAILED (" +
+                    (/scope/.test(e.message)
+                      ? "the Gmail compose permission is missing — ask them to reconnect Google from the You tab"
+                      : "Gmail is unreachable") +
+                    "). NO draft exists; never claim one was saved."
+                );
+              }
+            }
+          }
+        } catch (e) {
+          blocks.push("TOOL RESULT — GMAIL: inbox unreachable right now; no draft was made.");
+        }
+        return { block: "\n\n" + blocks.join("\n\n"), sources, documents };
+      }
+
+      // ---- MEETING PREP (D4) ----
+      if (userId && RE.meetingPrep.test(msg)) {
+        if (!gtokens.isConnected(userId)) {
+          blocks.push(
+            "TOOL RESULT — the user asked to prepare for their meeting but Google is NOT connected. " +
+              "Point them to Today tab → Inbox → Connect."
+          );
+        } else {
+          try {
+            const prep = await gapi.meetingPrep(userId);
+            const d = gapi.describeMeetingPrep(prep, tzOffsetMin);
+            blocks.push(
+              "TOOL RESULT — LIVE MEETING PREPARATION:\n" +
+                (d || "No upcoming timed meeting in the next two days.") +
+                "\nBrief them warmly: when and where, who's attending, and anything relevant from the recent emails. Answer from this data only."
+            );
+          } catch (_) {
+            blocks.push("TOOL RESULT — meeting details are unreachable right now; say so briefly.");
+          }
+        }
+        return { block: "\n\n" + blocks.join("\n\n"), sources, documents };
+      }
+
+      // ---- UNIT CONVERSION (C4) — deterministic, zero network ----
+      {
+        const u = units.parseAndConvert(msg);
+        if (u) {
+          blocks.push(
+            "TOOL RESULT — EXACT unit conversion: " + u +
+              " Answer from this exact figure only."
+          );
         }
       }
 
@@ -383,5 +590,6 @@ async function buildToolContext({ userId, messages, tzOffsetMin = 330, lat, lng 
 
   return { block: "\n\n" + blocks.join("\n\n"), sources, documents };
 }
+
 
 module.exports = { buildToolContext, parseReminder };

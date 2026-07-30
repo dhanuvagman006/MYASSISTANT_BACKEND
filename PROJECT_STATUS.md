@@ -261,3 +261,33 @@ join validation, admin key gate. ALL PASSING (3 suites, 21+ checks).
 **Env additions**: RAZORPAY_KEY_ID / RAZORPAY_KEY_SECRET /
 RAZORPAY_WEBHOOK_SECRET (webhook URL: /billing/webhook, event
 payment_link.paid), ADMIN_KEY.
+
+## Update — 30 July 2026: Feature-list audit sweep (F2, C4, D2, D3, D4, G2)
+- **F2 — Privacy dashboard**: `src/routes/privacy.js` at `/privacy` (behind appAuth).
+  `GET /export` → one JSON of everything (secrets redacted); `DELETE /account` →
+  atomic cross-table transaction + doc files on disk + Google token revocation.
+  Table list is discovered defensively via sqlite_master.
+- **C4 — Unit conversion**: `src/services/tools/units.js` — deterministic
+  (length/mass/volume/area incl. acre-cent-gunta/speed/data/temperature),
+  wired into intents; zero network, zero AI cost.
+- **D2 — Draft replies**: `POST /google/draft` + voice intent "reply to
+  Ramesh's email saying…" — body composed by ONE dedicated AI call, draft
+  saved deterministically in Gmail (NEVER sent; user reviews in Gmail).
+  Needs the gmail.compose scope (app now requests it).
+- **D3 — Calendar by voice**: `POST /google/event` + voice creation with a
+  SPOKEN PREVIEW → yes/no confirm (2-min TTL pending map, same pattern as
+  Swiggy; NOTE: move both Maps to Redis for multi-node). chrono-node parses
+  the time on the user's clock; missing time → Hari asks instead of guessing.
+  Needs the calendar.events scope. `updateEvent` helper ready for edits.
+- **D4 — Meeting prep**: `GET /google/meeting-prep` + "prep me for my
+  meeting" intent — next timed event + recent emails from ≤3 attendees,
+  fetched in parallel.
+- **G2 — Call preview & rules**: `agent_call_settings` table (master switch,
+  daily limit, allowed hours) with GET/PUT `/agent-call/settings`;
+  `POST /agent-call/preview` returns the exact opening line + rule verdict;
+  `POST /agent-call` now enforces the rules server-side (403 with a
+  ready-to-speak `say`). Billing 402 fires first by middleware order.
+- **Tests**: `scripts/features-test.js` added to `npm test` — 4 suites, all
+  passing (unit conversion exactness, export redaction, delete finality +
+  dead login, rules/preview, google endpoint validation & honest 409s,
+  intent-layer honesty while unlinked).
