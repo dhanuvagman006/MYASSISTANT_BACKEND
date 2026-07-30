@@ -50,6 +50,8 @@ const stmts = {
   kvSet: db.prepare(
     "INSERT INTO kv (k, v) VALUES (?, ?) ON CONFLICT(k) DO UPDATE SET v = excluded.v"
   ),
+  kvDel: db.prepare("DELETE FROM kv WHERE k = ?"),
+  kvAllPending: db.prepare("SELECT k, v FROM kv WHERE k LIKE 'swiggy_pending:%'"),
 };
 
 const BASE = () => (process.env.SWIGGY_MCP_BASE || "https://mcp.swiggy.com").replace(/\/$/, "");
@@ -119,11 +121,33 @@ async function clientReg() {
 }
 
 // ---- PKCE flow ----
-// state → { userId, verifier, at }; tiny, self-cleaning (10-min TTL).
-const pending = new Map();
+// state → { userId, verifier, at }; 10-min TTL. Persisted in the kv
+// table (key 'swiggy_pending:<state>') so an in-flight link survives a
+// server restart — in dev the container restarts constantly (env edits,
+// nodemon), and an in-memory map made every such restart kill the link
+// mid-OTP with "link expired".
+const PENDING_TTL = 600_000;
+const pendingKey = (state) => `swiggy_pending:${state}`;
+function pendingSet(state, data) {
+  stmts.kvSet.run(pendingKey(state), JSON.stringify(data));
+}
+function pendingTake(state) {
+  // Read-and-delete in one step: a state is single-use.
+  const row = stmts.kvGet.get(pendingKey(state));
+  if (!row) return null;
+  stmts.kvDel.run(pendingKey(state));
+  const p = JSON.parse(row.v);
+  return Date.now() - p.at > PENDING_TTL ? null : p;
+}
 function sweepPending() {
-  const cutoff = Date.now() - 600_000;
-  for (const [k, v] of pending) if (v.at < cutoff) pending.delete(k);
+  const cutoff = Date.now() - PENDING_TTL;
+  for (const { k, v } of stmts.kvAllPending.all()) {
+    try {
+      if (JSON.parse(v).at < cutoff) stmts.kvDel.run(k);
+    } catch {
+      stmts.kvDel.run(k);
+    }
+  }
 }
 
 /** Step 1: build the browser URL the app should open. */
@@ -136,7 +160,7 @@ async function beginLink(userId) {
   const [meta, client] = await Promise.all([metadata(), clientReg()]);
   const verifier = b64url(crypto.randomBytes(32));
   const state = b64url(crypto.randomBytes(16));
-  pending.set(state, { userId, verifier, at: Date.now() });
+  pendingSet(state, { userId, verifier, at: Date.now() });
   const u = new URL(meta.authorization_endpoint);
   u.searchParams.set("response_type", "code");
   u.searchParams.set("client_id", client.client_id);
@@ -150,9 +174,8 @@ async function beginLink(userId) {
 
 /** Step 2: the OAuth callback exchanges code → tokens. Returns userId. */
 async function completeLink(state, code) {
-  const p = pending.get(state);
-  if (!p || Date.now() - p.at > 600_000) throw new Error("swiggy: link expired — try again");
-  pending.delete(state);
+  const p = pendingTake(state);
+  if (!p) throw new Error("swiggy: link expired — try again");
   const [meta, client] = await Promise.all([metadata(), clientReg()]);
   const t = await jfetch(meta.token_endpoint, {
     method: "POST",
