@@ -96,7 +96,6 @@ router.post("/google", async (req, res) => {
       name: p.name,
       givenName: p.given_name,
       email: p.email,
-      picture: p.picture,
       locale: p.locale,
     });
     respond(res, user, created);

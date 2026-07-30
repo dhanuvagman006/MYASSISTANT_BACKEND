@@ -120,14 +120,17 @@ function clearMemories(userId) {
  * Called from routes/auth.js with whatever the identity provider gave us.
  * Never overwrites AI/user facts because keys are namespaced 'profile.*'-style.
  */
-function seedProfile(userId, { name, givenName, email, picture, locale } = {}) {
+function seedProfile(userId, { name, givenName, email, locale } = {}) {
   const put = (key, value) =>
     value && remember(userId, { key, value, category: "profile", source: "signup" });
   put("profile_name", name);
   put("profile_given_name", givenName);
   put("profile_email", email);
-  put("profile_picture", picture);
   if (locale) put("profile_locale", locale);
+  // The avatar URL is not a "memory" — it's noise in the user's memory
+  // list and useless to the model. Never store it, and clean up rows
+  // seeded by older versions on the user's next sign-in.
+  deleteByKey(userId, "profile_picture");
 }
 
 /**
@@ -143,7 +146,6 @@ function buildMemoryPrompt(userId, { budget = 2200, excludeDocFacts = false } = 
   const lines = [];
   for (const cat of order) {
     for (const r of rows.filter((x) => x.category === cat)) {
-      if (r.key === "profile_picture") continue; // URL — useless to the model
       // When document search already injected full doc data this turn,
       // the doc_* facts are pure duplication — the model would read the
       // same receipt twice.
