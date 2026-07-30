@@ -53,7 +53,19 @@ const stmts = {
 };
 
 const BASE = () => (process.env.SWIGGY_MCP_BASE || "https://mcp.swiggy.com").replace(/\/$/, "");
-const REDIRECT = () => process.env.SWIGGY_REDIRECT_URI || "http://localhost:3000/swiggy/callback";
+// Redirect URI resolution order:
+//   1. SWIGGY_REDIRECT_URI          — explicit override
+//   2. PUBLIC_BASE_URL/swiggy/callback — the deployed server's own URL
+//   3. localhost:3000               — local dev ONLY
+// The localhost fallback used to win silently in production, so Swiggy
+// bounced users' phones to localhost → ERR_CONNECTION_REFUSED and the
+// link never completed.
+const REDIRECT = () => {
+  if (process.env.SWIGGY_REDIRECT_URI) return process.env.SWIGGY_REDIRECT_URI;
+  const pub = (process.env.PUBLIC_BASE_URL || "").replace(/\/$/, "");
+  if (pub) return `${pub}/swiggy/callback`;
+  return "http://localhost:3000/swiggy/callback";
+};
 const TIMEOUT = 10_000;
 const b64url = (buf) => buf.toString("base64").replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
 
@@ -117,6 +129,10 @@ function sweepPending() {
 /** Step 1: build the browser URL the app should open. */
 async function beginLink(userId) {
   sweepPending();
+  // Better a clear error than a browser tab pointing at localhost.
+  if (process.env.NODE_ENV === "production" && REDIRECT().includes("localhost")) {
+    throw new Error("swiggy: set PUBLIC_BASE_URL or SWIGGY_REDIRECT_URI in production");
+  }
   const [meta, client] = await Promise.all([metadata(), clientReg()]);
   const verifier = b64url(crypto.randomBytes(32));
   const state = b64url(crypto.randomBytes(16));
