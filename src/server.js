@@ -26,6 +26,37 @@ if (process.env.NODE_ENV === "production" && process.env.AUTH_DISABLED === "true
 const app = express();
 app.set("trust proxy", 1);
 app.use(helmet());
+
+// ---- METRICS (/metrics, Prometheus format) ----
+// Powers the external monitoring VPS: request rate, latency histograms,
+// status codes per route, plus Node process/heap defaults.
+// Protected by METRICS_TOKEN when set (send: Authorization: Bearer <token>)
+// so the endpoint can sit behind the public ingress without leaking
+// traffic patterns to the world.
+const promBundle = require("express-prom-bundle");
+app.use((req, res, next) => {
+  const t = process.env.METRICS_TOKEN;
+  if (req.path === "/metrics" && t && req.get("Authorization") !== `Bearer ${t}`) {
+    return res.status(404).json({ error: "not found" }); // don't advertise
+  }
+  next();
+});
+app.use(
+  promBundle({
+    includeMethod: true,
+    includePath: true,
+    metricsPath: "/metrics",
+    promClient: { collectDefaultMetrics: {} },
+    // Collapse ids so metrics stay low-cardinality.
+    normalizePath: [
+      ["^/docs/\\d+.*", "/docs/#id"],
+      ["^/reminders/\\d+", "/reminders/#id"],
+      ["^/memory/\\d+", "/memory/#id"],
+      ["^/agent-call/plivo/[^/]+/", "/agent-call/plivo/#id/"],
+      ["^/agent-call/[a-f0-9]{16,}", "/agent-call/#id"],
+    ],
+  })
+);
 app.use(
   express.json({
     limit: "2mb",

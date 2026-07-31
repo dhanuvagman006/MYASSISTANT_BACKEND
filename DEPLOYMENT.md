@@ -71,7 +71,7 @@ one node; for multi-node scale-out move files to S3-compatible storage.
 
 ## 5. Monitoring, logs, alerts
 
-See `k8s/monitoring/README.md` — three Helm commands install
+See `(moved to the MYASSISTANT_MONITORING repo) README.md` — three Helm commands install
 Prometheus + Grafana + Alertmanager + Loki + Promtail, and
 `alerts.yaml` adds app-specific alerts (backend down, crash-looping,
 memory/CPU pressure, disk filling, backup failures). Point Alertmanager

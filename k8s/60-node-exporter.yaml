@@ -1,0 +1,49 @@
+# node-exporter — host CPU/RAM/disk/network metrics on every cluster node.
+#
+# Monitoring runs OFF-cluster (the MYASSISTANT_MONITORING VPS scrapes over
+# the network), so this uses hostNetwork:9100. LOCK IT DOWN with the
+# firewall: allow 9100 ONLY from the monitoring VPS IP, e.g.
+#   sudo ufw allow from <MONITORING_VPS_IP> to any port 9100 proto tcp
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: node-exporter
+  namespace: myassistant
+  labels:
+    app: node-exporter
+spec:
+  selector:
+    matchLabels:
+      app: node-exporter
+  template:
+    metadata:
+      labels:
+        app: node-exporter
+    spec:
+      hostNetwork: true
+      hostPID: true
+      containers:
+        - name: node-exporter
+          image: quay.io/prometheus/node-exporter:v1.8.2
+          args:
+            - --path.rootfs=/host
+            - --web.listen-address=:9100
+          ports:
+            - containerPort: 9100
+              hostPort: 9100
+              name: metrics
+          volumeMounts:
+            - name: rootfs
+              mountPath: /host
+              readOnly: true
+          resources:
+            requests: { cpu: 20m, memory: 32Mi }
+            limits: { cpu: 100m, memory: 64Mi }
+          securityContext:
+            readOnlyRootFilesystem: true
+      volumes:
+        - name: rootfs
+          hostPath:
+            path: /
+      tolerations: # run on control-plane nodes too (single-node k3s)
+        - operator: Exists
