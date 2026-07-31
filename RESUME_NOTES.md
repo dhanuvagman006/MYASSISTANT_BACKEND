@@ -51,13 +51,15 @@ Working doc for Claude + Dhanu to resume. Read top-to-bottom for full state.
 - Port 3000 = backend forward, 3001 = Grafana forward. Kill stale forwards
   with `sudo fuser -k 3000/tcp`.
 
-## NEXT TASK (agreed, not started): two-VPS production hosting
+## NEXT TASK: two-VPS production hosting (ARCHITECTURE REVISED by user)
 
-Plan sketched with the user:
-- ONE k3s cluster across two VPSes (NOT two clusters).
-  - VPS-1: k3s server + backend + Postgres + ingress (public 80/443).
-  - VPS-2: agent node (`K3S_URL=https://<vps1>:6443 K3S_TOKEN=...`),
-    monitoring pinned here via nodeSelector in kube-prometheus-values.yaml.
+- VPS-1: k3s cluster — backend + Postgres + ingress (THIS repo).
+  Exposes metrics: backend /metrics (express-prom-bundle, METRICS_TOKEN
+  bearer auth) + node-exporter DaemonSet on hostPort 9100 (firewall to
+  monitoring VPS IP only).
+- VPS-2: plain Docker Compose — separate repo MYASSISTANT_MONITORING
+  (Prometheus + Grafana + Alertmanager) scraping VPS-1 remotely.
+  k8s/monitoring/ was REMOVED from this repo accordingly.
 - Use k8s/30-ingress.yaml (ingress-nginx or built-in traefik + cert-manager)
   with real DNS: api.<domain> → VPS-1, grafana.<domain> too.
 - Flannel with WireGuard backend for encrypted inter-node traffic.
