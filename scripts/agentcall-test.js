@@ -22,9 +22,9 @@ let BASE = ""; // set in main() once the port is known
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
-async function post(path, body, form = false) {
+async function post(path, body, form = false, method = "POST") {
   const r = await fetch(BASE + path, {
-    method: "POST",
+    method,
     headers: {
       "content-type": form
         ? "application/x-www-form-urlencoded"
@@ -162,8 +162,22 @@ async function main() {
   console.log("✔ /hangup: early hangup → summarized from transcript");
 
   // 9) Bad inputs.
+  // checkRules() runs before number validation, and default calling hours
+  // are 8:00–21:00 local — so this suite used to fail whenever CI ran
+  // outside that window (403 call_rules instead of 400). Open the window
+  // to 0–24 for the test user so validation is what we actually test,
+  // then separately verify the rules gate deterministically.
+  r = await post("/agent-call/settings", { hoursStart: 0, hoursEnd: 24 }, false, "PUT");
+  assert.strictEqual(r.status, 200);
   r = await post("/agent-call", { toNumber: "??", contactName: "X", task: "hi" });
   assert.strictEqual(r.status, 400);
+  // Rules gate: master switch off → 403 regardless of time of day.
+  await post("/agent-call/settings", { enabled: false }, false, "PUT");
+  r = await post("/agent-call", { toNumber: "+919876500000", contactName: "X", task: "hi" });
+  assert.strictEqual(r.status, 403);
+  assert.strictEqual(r.json.error, "call_rules");
+  await post("/agent-call/settings", { enabled: true }, false, "PUT");
+  console.log("✔ call rules: 403 when disabled; hours widened for CI determinism");
   r = await post(`/agent-call/plivo/deadbeef/answer`, {}, true);
   assert.strictEqual(r.status, 404);
   console.log("✔ validation: bad number 400, unknown call 404");

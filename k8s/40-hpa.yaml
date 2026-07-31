@@ -1,0 +1,42 @@
+# Horizontal Pod Autoscaler
+#
+# ⚠️ DO NOT APPLY THIS until the app is migrated off SQLite.
+# better-sqlite3 on a ReadWriteOnce PVC = exactly one writer pod. If the HPA
+# scales to 2+, the extra pods either can't mount the volume (RWO) or corrupt
+# the DB. This manifest is here so the moment you switch to Postgres, scaling
+# is one `kubectl apply` away.
+#
+# Prerequisite: Metrics Server (most managed clusters ship it; otherwise):
+#   kubectl apply -f https://github.com/kubernetes-sigs/metrics-server/releases/latest/download/components.yaml
+# Verify with: kubectl top pods -n myassistant
+#
+# Also change the Deployment strategy from Recreate to RollingUpdate when
+# you enable this.
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: myassistant-backend
+  namespace: myassistant
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: myassistant-backend
+  minReplicas: 2
+  maxReplicas: 6
+  metrics:
+    - type: Resource
+      resource:
+        name: cpu
+        target:
+          type: Utilization
+          averageUtilization: 70
+    - type: Resource
+      resource:
+        name: memory
+        target:
+          type: Utilization
+          averageUtilization: 80
+  behavior:
+    scaleDown:
+      stabilizationWindowSeconds: 300 # don't flap on brief traffic dips

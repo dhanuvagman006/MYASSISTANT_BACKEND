@@ -1,0 +1,84 @@
+# Deployment for MYASSISTANT_BACKEND
+#
+# IMPORTANT — replicas: 1 and strategy: Recreate are DELIBERATE.
+# The app stores users/billing/reminders in better-sqlite3 on a PVC.
+# SQLite allows one writer process; RollingUpdate would briefly run two
+# pods against the same DB file and risk "database is locked" errors or
+# corruption. Recreate = a few seconds of downtime per deploy, but safe.
+# To scale horizontally (see 40-hpa.yaml), migrate the DB to Postgres first.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: myassistant-backend
+  namespace: myassistant
+  labels:
+    app: myassistant-backend
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app: myassistant-backend
+  template:
+    metadata:
+      labels:
+        app: myassistant-backend
+    spec:
+      securityContext:
+        fsGroup: 1000 # node user in the image — makes the PVC writable
+      containers:
+        - name: backend
+          # CI overwrites this tag on every deploy (kubectl set image).
+          image: ghcr.io/dhanuvagman006/myassistant_backend:latest
+          ports:
+            - name: http
+              containerPort: 3000
+          envFrom:
+            - configMapRef:
+                name: myassistant-config
+            - secretRef:
+                name: myassistant-secrets
+          volumeMounts:
+            - name: data
+              mountPath: /app/data
+          resources:
+            requests:
+              cpu: 100m
+              memory: 128Mi
+            limits:
+              cpu: 500m
+              memory: 512Mi
+          # Server exposes GET /health -> {ok:true}
+          readinessProbe:
+            httpGet: { path: /health, port: http }
+            initialDelaySeconds: 3
+            periodSeconds: 5
+          livenessProbe:
+            httpGet: { path: /health, port: http }
+            initialDelaySeconds: 10
+            periodSeconds: 15
+            failureThreshold: 3
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: false # SQLite temp files need writes
+      volumes:
+        - name: data
+          persistentVolumeClaim:
+            claimName: myassistant-data
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: myassistant-backend
+  namespace: myassistant
+  labels:
+    app: myassistant-backend
+spec:
+  type: ClusterIP
+  selector:
+    app: myassistant-backend
+  ports:
+    - name: http
+      port: 80
+      targetPort: http

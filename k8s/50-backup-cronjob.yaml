@@ -1,0 +1,80 @@
+# Nightly SQLite backup.
+#
+# Strategy: a CronJob mounts the SAME PVC read-write, runs `sqlite3 .backup`
+# (the safe online-backup API — never `cp` a live SQLite file), gzips it,
+# and writes to a second "backups" PVC. Keeps the last 14 days.
+#
+# NOTE on RWO volumes: a ReadWriteOnce PVC can be mounted by multiple pods
+# only if they land on the SAME node. The podAffinity below pins the backup
+# job next to the backend pod so this always works.
+#
+# For real disaster recovery, add an upload step to off-cluster storage
+# (S3/GCS/B2) at the marked line — a cluster-level failure takes both PVCs.
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: myassistant-backups
+  namespace: myassistant
+spec:
+  accessModes: ["ReadWriteOnce"]
+  resources:
+    requests:
+      storage: 10Gi
+---
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: myassistant-db-backup
+  namespace: myassistant
+spec:
+  schedule: "30 21 * * *" # 21:30 UTC = 03:00 IST, nightly
+  concurrencyPolicy: Forbid
+  successfulJobsHistoryLimit: 3
+  failedJobsHistoryLimit: 3
+  jobTemplate:
+    spec:
+      backoffLimit: 2
+      template:
+        spec:
+          restartPolicy: Never
+          affinity:
+            podAffinity:
+              requiredDuringSchedulingIgnoredDuringExecution:
+                - labelSelector:
+                    matchLabels:
+                      app: myassistant-backend
+                  topologyKey: kubernetes.io/hostname
+          containers:
+            - name: backup
+              image: alpine:3.20
+              command: ["/bin/sh", "-c"]
+              args:
+                - |
+                  set -e
+                  apk add --no-cache sqlite gzip >/dev/null
+                  STAMP=$(date +%Y%m%d-%H%M%S)
+                  mkdir -p /backups
+                  for db in /data/*.db /data/*.sqlite; do
+                    [ -e "$db" ] || continue
+                    name=$(basename "$db")
+                    echo "backing up $name"
+                    sqlite3 "$db" ".backup '/backups/${name}.${STAMP}'"
+                    gzip "/backups/${name}.${STAMP}"
+                  done
+                  # ---- optional: upload to S3/GCS here (rclone/aws-cli) ----
+                  # prune backups older than 14 days
+                  find /backups -name '*.gz' -mtime +14 -delete
+                  echo "done; current backups:"
+                  ls -lh /backups | tail -20
+              volumeMounts:
+                - name: data
+                  mountPath: /data
+                - name: backups
+                  mountPath: /backups
+          volumes:
+            - name: data
+              persistentVolumeClaim:
+                claimName: myassistant-data
+            - name: backups
+              persistentVolumeClaim:
+                claimName: myassistant-backups

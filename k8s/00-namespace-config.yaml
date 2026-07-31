@@ -1,0 +1,38 @@
+# Namespace + non-secret config + storage for MYASSISTANT_BACKEND
+# Apply order: this file first, then create the Secret (see 01-secret.example.yaml),
+# then 10-deployment.yaml, 20-service.yaml, 30-ingress.yaml.
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: myassistant
+---
+# Non-secret configuration. Secrets (API keys, JWT) live in the Secret object.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: myassistant-config
+  namespace: myassistant
+data:
+  NODE_ENV: "production"
+  PORT: "3000"
+  DATA_DIR: "/app/data"
+  DEFAULT_COUNTRY_CODE: "+91"
+  AI_PROVIDER_ORDER: "gemini,groq"
+  GEMINI_MODEL: "gemini-2.0-flash"
+  # PUBLIC_BASE_URL must match your Ingress host (used for OAuth callbacks
+  # and Plivo webhooks) — change this to your real domain.
+  PUBLIC_BASE_URL: "https://api.example.com"
+---
+# SQLite database lives on this volume. ReadWriteOnce is fine because the
+# Deployment runs exactly 1 replica (SQLite = single writer).
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: myassistant-data
+  namespace: myassistant
+spec:
+  accessModes: ["ReadWriteOnce"]
+  resources:
+    requests:
+      storage: 5Gi
+  # storageClassName: <uncomment and set if your cluster has no default class>

@@ -1,0 +1,54 @@
+# HTTPS Ingress — requires two cluster add-ons (one-time install):
+#
+#   1. ingress-nginx:
+#      helm repo add ingress-nginx https://kubernetes.github.io/ingress-nginx
+#      helm install ingress-nginx ingress-nginx/ingress-nginx -n ingress-nginx --create-namespace
+#
+#   2. cert-manager (auto Let's Encrypt certificates):
+#      helm repo add jetstack https://charts.jetstack.io
+#      helm install cert-manager jetstack/cert-manager -n cert-manager \
+#        --create-namespace --set crds.enabled=true
+#
+# Then point your DNS A record (api.example.com) at the ingress-nginx
+# LoadBalancer IP, replace the host + email below, and apply this file.
+apiVersion: cert-manager.io/v1
+kind: ClusterIssuer
+metadata:
+  name: letsencrypt-prod
+spec:
+  acme:
+    server: https://acme-v02.api.letsencrypt.org/directory
+    email: you@example.com # <-- CHANGE: Let's Encrypt expiry notices go here
+    privateKeySecretRef:
+      name: letsencrypt-prod-account
+    solvers:
+      - http01:
+          ingress:
+            ingressClassName: nginx
+---
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: myassistant-backend
+  namespace: myassistant
+  annotations:
+    cert-manager.io/cluster-issuer: letsencrypt-prod
+    nginx.ingress.kubernetes.io/ssl-redirect: "true"
+    # Voice/doc uploads (multer) can be large:
+    nginx.ingress.kubernetes.io/proxy-body-size: "25m"
+spec:
+  ingressClassName: nginx
+  tls:
+    - hosts: ["api.example.com"] # <-- CHANGE to your domain
+      secretName: myassistant-tls
+  rules:
+    - host: api.example.com # <-- CHANGE to your domain
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: myassistant-backend
+                port:
+                  number: 80
