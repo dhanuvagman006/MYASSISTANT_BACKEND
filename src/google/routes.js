@@ -36,10 +36,10 @@ router.post("/connect", async (req, res) => {
   }
 });
 
-router.get("/status", (req, res) => {
+router.get("/status", async (req, res) => {
   const id = uid(req, res);
   if (id === null) return;
-  res.json({ connected: tokens.isConnected(id) });
+  res.json({ connected: await tokens.isConnected(id) });
 });
 
 router.delete("/", async (req, res) => {

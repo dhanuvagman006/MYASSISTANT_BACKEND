@@ -1,16 +1,37 @@
 # MYASSISTANT_BACKEND — place in repo root next to the Dockerfile
 # Usage: cp .env.example .env  (fill in keys)  →  docker compose up --build
+# The backend now uses Postgres; compose starts one and wires DATABASE_URL.
 services:
   backend:
     build: .
     ports:
       - "3000:3000"
     env_file: .env
+    environment:
+      DATABASE_URL: postgres://myassistant:localdev@postgres:5432/myassistant
+    depends_on:
+      postgres:
+        condition: service_healthy
     restart: unless-stopped
     volumes:
-      # Persist the SQLite user DB across rebuilds/restarts.
-      # Without this, every redeploy would wipe all user accounts.
+      # User DOCUMENT FILES (photos/PDFs) — the DB itself lives in Postgres.
       - backend-data:/app/data
+
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: myassistant
+      POSTGRES_PASSWORD: localdev
+      POSTGRES_DB: myassistant
+    volumes:
+      - pg-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U myassistant -d myassistant"]
+      interval: 3s
+      timeout: 3s
+      retries: 15
+    restart: unless-stopped
 
 volumes:
   backend-data:
+  pg-data:

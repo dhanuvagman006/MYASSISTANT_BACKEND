@@ -41,14 +41,14 @@ async function analyzeInBackground(userId, row, buffer, mime) {
   try {
     const meta = await analyzeDocument(buffer, mime);
     if (!meta) return;
-    const updated = docs.setMetadata(userId, row.id, meta) || row;
+    const updated = (await docs.setMetadata(userId, row.id, meta)) || row;
     // A one-line durable fact ("context") so plain chat — with no document
     // search at all — still knows about the visit/purchase. Title + date
     // ONLY: the note/summary live on the document row and are injected by
     // doc search when relevant — duplicating them here made the AI read
     // the same content twice in recall answers.
     const when = meta.docDate || new Date().toISOString().slice(0, 10);
-    memory.remember(userId, {
+    await memory.remember(userId, {
       key: `doc_${updated.id}`,
       value: `Saved a ${updated.category || "document"}: "${updated.title}" dated ${when}`,
       category: "context",
@@ -66,7 +66,7 @@ const healAttempted = new Set();
 
 router.post(
   "/",
-  billing.enforceDocUpload((uid) => docs.countDocuments(uid)),
+  billing.enforceDocUpload((uid) => docs.countDocuments(uid)),  // countDocuments is async; enforceDocUpload awaits it
   upload.single("file"),
   async (req, res) => {
   const id = uid(req, res);
@@ -75,7 +75,7 @@ router.post(
   if (!f || !f.buffer?.length) return res.status(400).json({ error: "file required" });
   if (!OK_MIME.has(f.mimetype)) return res.status(415).json({ error: `unsupported type ${f.mimetype}` });
 
-  const row = docs.createDocument(id, {
+  const row = await docs.createDocument(id, {
     buffer: f.buffer,
     filename: f.originalname,
     mime: f.mimetype,
@@ -92,10 +92,10 @@ router.post(
   await analyzeInBackground(id, row, f.buffer, f.mimetype);
 });
 
-router.get("/", (req, res) => {
+router.get("/", async (req, res) => {
   const id = uid(req, res);
   if (id === null) return;
-  const rows = docs.listDocuments(id);
+  const rows = await docs.listDocuments(id);
   res.json({ documents: rows.map(docs.toClient) });
 
   // SELF-HEAL: docs whose analysis never landed (saved while the Gemini
@@ -112,29 +112,29 @@ router.get("/", (req, res) => {
   }
 });
 
-router.get("/:id/file", (req, res) => {
+router.get("/:id/file", async (req, res) => {
   const id = uid(req, res);
   if (id === null) return;
-  const row = docs.getDocument(id, Number(req.params.id));
+  const row = await docs.getDocument(id, Number(req.params.id));
   if (!row || !fs.existsSync(row.path)) return res.status(404).json({ error: "not found" });
   res.setHeader("Content-Type", row.mime);
   res.setHeader("Cache-Control", "private, max-age=86400"); // immutable per id
   fs.createReadStream(row.path).pipe(res);
 });
 
-router.patch("/:id", (req, res) => {
+router.patch("/:id", async (req, res) => {
   const id = uid(req, res);
   if (id === null) return;
-  const ok = docs.setNote(id, Number(req.params.id), req.body?.note);
+  const ok = await docs.setNote(id, Number(req.params.id), req.body?.note);
   res.status(ok ? 200 : 404).json(ok ? { ok: true } : { error: "not found" });
 });
 
-router.delete("/:id", (req, res) => {
+router.delete("/:id", async (req, res) => {
   const id = uid(req, res);
   if (id === null) return;
   const docId = Number(req.params.id);
-  const ok = docs.deleteDocument(id, docId);
-  if (ok) memory.deleteByKey?.(id, `doc_${docId}`);
+  const ok = await docs.deleteDocument(id, docId);
+  if (ok) await memory.deleteByKey?.(id, `doc_${docId}`);
   res.status(ok ? 200 : 404).json(ok ? { ok: true } : { error: "not found" });
 });
 

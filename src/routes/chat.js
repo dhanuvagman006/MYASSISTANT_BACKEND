@@ -58,7 +58,7 @@ router.post("/", async (req, res) => {
     // so personalization costs zero extra latency.
     const extraSystem =
       (userId
-        ? buildMemoryPrompt(userId, {
+        ? await buildMemoryPrompt(userId, {
             excludeDocFacts: (toolCtx.documents || []).length > 0,
           })
         : "") +
@@ -122,7 +122,7 @@ router.post("/stream", async (req, res) => {
     sources = ctx.sources;
     documents = ctx.documents || [];
     const extraSystem =
-      (userId ? buildMemoryPrompt(userId) : "") + ctx.block + styleDirective(req);
+      (userId ? await buildMemoryPrompt(userId) : "") + ctx.block + styleDirective(req);
 
     try {
       for await (const d of generateReplyStream(trimmed, { extraSystem })) {
@@ -161,8 +161,8 @@ router.post("/stream", async (req, res) => {
  */
 router.post("/greeting", async (req, res) => {
   const userId = userIdOf(req);
-  const memoryBlock = userId ? buildMemoryPrompt(userId) : "";
-  const known = userId ? require("../memory/store").listMemories(userId) : [];
+  const memoryBlock = userId ? await buildMemoryPrompt(userId) : "";
+  const known = userId ? await require("../memory/store").listMemories(userId) : [];
   const learned = known.filter((m) => m.category !== "profile").length;
 
   const directive =

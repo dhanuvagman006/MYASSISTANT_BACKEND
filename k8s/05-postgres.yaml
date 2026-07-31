@@ -1,0 +1,98 @@
+# PostgreSQL for MYASSISTANT_BACKEND
+#
+# Apply AFTER 00-namespace-config.yaml and the postgres secret:
+#
+#   kubectl -n myassistant create secret generic postgres-secret \
+#     --from-literal=POSTGRES_USER=myassistant \
+#     --from-literal=POSTGRES_PASSWORD="$(openssl rand -hex 24)" \
+#     --from-literal=POSTGRES_DB=myassistant
+#
+# Then add DATABASE_URL to myassistant-secrets (see k8s/01-secret.example.yaml):
+#   postgres://myassistant:<that password>@postgres:5432/myassistant
+#
+# Single-instance Postgres on a PVC — right-sized for one laptop / small
+# deployment. For production HA later, swap this file for a CloudNativePG
+# cluster or a managed Postgres and only DATABASE_URL changes.
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: postgres-data
+  namespace: myassistant
+spec:
+  accessModes: ["ReadWriteOnce"]
+  resources:
+    requests:
+      storage: 5Gi
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: postgres
+  namespace: myassistant
+  labels:
+    app: postgres
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate # one PVC, one writer — never two postgres pods at once
+  selector:
+    matchLabels:
+      app: postgres
+  template:
+    metadata:
+      labels:
+        app: postgres
+    spec:
+      containers:
+        - name: postgres
+          image: postgres:16-alpine
+          ports:
+            - name: pg
+              containerPort: 5432
+          envFrom:
+            - secretRef:
+                name: postgres-secret
+          env:
+            # Subdirectory keeps initdb happy on ext4 lost+found volumes.
+            - name: PGDATA
+              value: /var/lib/postgresql/data/pgdata
+          volumeMounts:
+            - name: data
+              mountPath: /var/lib/postgresql/data
+          resources:
+            requests:
+              cpu: 100m
+              memory: 128Mi
+            limits:
+              cpu: "1"
+              memory: 512Mi
+          readinessProbe:
+            exec:
+              command: ["pg_isready", "-U", "myassistant", "-d", "myassistant"]
+            initialDelaySeconds: 5
+            periodSeconds: 5
+          livenessProbe:
+            exec:
+              command: ["pg_isready", "-U", "myassistant", "-d", "myassistant"]
+            initialDelaySeconds: 20
+            periodSeconds: 15
+      volumes:
+        - name: data
+          persistentVolumeClaim:
+            claimName: postgres-data
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: postgres
+  namespace: myassistant
+  labels:
+    app: postgres
+spec:
+  type: ClusterIP
+  selector:
+    app: postgres
+  ports:
+    - name: pg
+      port: 5432
+      targetPort: pg

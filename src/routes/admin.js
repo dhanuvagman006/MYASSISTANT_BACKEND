@@ -18,8 +18,8 @@ router.use((req, res, next) => {
   next();
 });
 
-router.get("/stats", (_req, res) => {
-  res.json({ ts: Date.now(), ...billing.stats() });
+router.get("/stats", async (_req, res) => {
+  res.json({ ts: Date.now(), ...(await billing.stats()) });
 });
 
 module.exports = router;

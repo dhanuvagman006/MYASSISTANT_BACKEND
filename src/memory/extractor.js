@@ -52,8 +52,7 @@ async function extractAndSave(userId, userMessage, assistantReply, opts = {}) {
     }
     lastRun.set(userId, now);
 
-    const known = store
-      .listMemories(userId)
+    const known = (await store.listMemories(userId))
       .map((m) => `${m.key}: ${m.value}`)
       .join("\n")
       .slice(0, 2000);
@@ -81,7 +80,7 @@ async function extractAndSave(userId, userMessage, assistantReply, opts = {}) {
 
     for (const f of facts.slice(0, 4)) {
       if (f && typeof f === "object") {
-        const row = store.remember(userId, {
+        const row = await store.remember(userId, {
           key: f.key,
           value: f.value,
           category: f.category,

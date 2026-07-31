@@ -1,11 +1,11 @@
 # Deployment for MYASSISTANT_BACKEND
 #
-# IMPORTANT — replicas: 1 and strategy: Recreate are DELIBERATE.
-# The app stores users/billing/reminders in better-sqlite3 on a PVC.
-# SQLite allows one writer process; RollingUpdate would briefly run two
-# pods against the same DB file and risk "database is locked" errors or
-# corruption. Recreate = a few seconds of downtime per deploy, but safe.
-# To scale horizontally (see 40-hpa.yaml), migrate the DB to Postgres first.
+# DB is Postgres (see 05-postgres.yaml) → many pods can write safely, so
+# RollingUpdate gives zero-downtime deploys and the HPA (40-hpa.yaml) can
+# scale replicas. The PVC now holds ONLY user document files (DATA_DIR/files);
+# note it is ReadWriteOnce, so all replicas schedule onto the same node —
+# fine on a single-node k3s. For multi-node scaling later, move files to
+# S3-compatible storage or an RWX StorageClass.
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -14,9 +14,12 @@ metadata:
   labels:
     app: myassistant-backend
 spec:
-  replicas: 1
+  replicas: 1  # HPA takes over replica count once 40-hpa.yaml is applied
   strategy:
-    type: Recreate
+    type: RollingUpdate
+    rollingUpdate:
+      maxUnavailable: 0
+      maxSurge: 1
   selector:
     matchLabels:
       app: myassistant-backend
@@ -61,7 +64,7 @@ spec:
             failureThreshold: 3
           securityContext:
             allowPrivilegeEscalation: false
-            readOnlyRootFilesystem: false # SQLite temp files need writes
+            readOnlyRootFilesystem: false # multer/doc uploads write temp files
       volumes:
         - name: data
           persistentVolumeClaim:

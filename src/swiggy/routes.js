@@ -13,9 +13,9 @@ function uid(req) {
   return Number.isInteger(id) && id > 0 ? id : null;
 }
 
-router.get("/status", (req, res) => {
+router.get("/status", async (req, res) => {
   const userId = uid(req);
-  res.json({ linked: userId ? tokens.isLinked(userId) : false });
+  res.json({ linked: userId ? await tokens.isLinked(userId) : false });
 });
 
 router.get("/connect", async (req, res) => {

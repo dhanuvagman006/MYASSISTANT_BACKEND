@@ -44,6 +44,7 @@ async function main() {
   const port = await require("./_free-port").freePort();
   process.env.PORT = String(port);
   BASE = `http://127.0.0.1:${port}`;
+  await require("./_reset-db").resetDb();
   require("../src/server");
   await sleep(500);
 
@@ -71,17 +72,17 @@ async function main() {
   console.log("✔ E.164 normalization (India default, intl passthrough)");
 
   const store = require("../src/agentcall/store");
-  const call = store.create({
+  const call = await store.create({
     userId: "anonymous-dev",
     contactName: "Allen Lobo",
     toNumber: "+919876543210",
     task: "ask him what time he will come home",
     lang: "en-IN",
   });
-  store.setState(call.id, "dialing");
+  await store.setState(call.id, "dialing");
 
   // 3) Contact answers → /answer returns GetInput+Speak XML (fallback line).
-  store.setState(call.id, "dialing");
+  await store.setState(call.id, "dialing");
   r = await post(`/agent-call/plivo/${call.id}/answer`, { CallStatus: "in-progress" }, true);
   assert.strictEqual(r.status, 200);
   assert.ok(r.text.includes("<GetInput"), "answer must listen while speaking");
@@ -91,16 +92,16 @@ async function main() {
 
   // 4) Voicemail: machine_detection=hangup ends the call at Plivo, our
   //    /hangup webhook sees the machine cause on a still-dialing call.
-  const vm = store.create({
+  const vm = await store.create({
     userId: "anonymous-dev",
     contactName: "Allen Lobo",
     toNumber: "+919876543210",
     task: "ask him when he's home",
   });
-  store.setState(vm.id, "dialing");
+  await store.setState(vm.id, "dialing");
   r = await post(`/agent-call/plivo/${vm.id}/hangup`, { CallStatus: "completed", HangupCause: "MACHINE_DETECTED" }, true);
-  assert.strictEqual(store.get(vm.id).state, "no_answer");
-  assert.ok(store.get(vm.id).result.includes("voicemail"));
+  assert.strictEqual((await store.get(vm.id)).state, "no_answer");
+  assert.ok((await store.get(vm.id)).result.includes("voicemail"));
   console.log("✔ /hangup: voicemail (machine detected) → no_answer");
 
   // 5) Contact replies → /input. With no AI keys the fallback thanks
@@ -113,7 +114,7 @@ async function main() {
   assert.strictEqual(r.status, 200);
   assert.ok(r.text.includes("<Hangup"), "fallback turn ends the call");
   await sleep(300); // summary is fire-and-forget
-  const done = store.get(call.id);
+  const done = await store.get(call.id);
   assert.strictEqual(done.state, "completed");
   assert.ok(
     done.result.includes("7 30"),
@@ -133,30 +134,30 @@ async function main() {
   console.log("✔ GET /agent-call/:id: poll sees completed + result");
 
   // 7) hangup webhook: no-answer while dialing marks the call terminal.
-  const na = store.create({
+  const na = await store.create({
     userId: "anonymous-dev",
     contactName: "Amma",
     toNumber: "+919876500000",
     task: "tell her dinner is at 8",
   });
-  store.setState(na.id, "dialing");
+  await store.setState(na.id, "dialing");
   r = await post(`/agent-call/plivo/${na.id}/hangup`, { CallStatus: "no-answer", HangupCause: "NO_ANSWER" }, true);
-  assert.strictEqual(store.get(na.id).state, "no_answer");
+  assert.strictEqual((await store.get(na.id)).state, "no_answer");
   console.log("✔ /hangup: no-answer → terminal state");
 
   // 8) Contact hangs up mid-conversation → still summarized.
-  const hung = store.create({
+  const hung = await store.create({
     userId: "anonymous-dev",
     contactName: "Ravi",
     toNumber: "+919876511111",
     task: "ask if he got the parcel",
   });
-  store.setState(hung.id, "in_progress");
-  store.addTurn(hung.id, "agent", "Hi, did the parcel arrive?");
-  store.addTurn(hung.id, "contact", "Yes it came this morning");
+  await store.setState(hung.id, "in_progress");
+  await store.addTurn(hung.id, "agent", "Hi, did the parcel arrive?");
+  await store.addTurn(hung.id, "contact", "Yes it came this morning");
   await post(`/agent-call/plivo/${hung.id}/hangup`, { CallStatus: "completed", HangupCause: "NORMAL_CLEARING" }, true);
   await sleep(300);
-  const h = store.get(hung.id);
+  const h = await store.get(hung.id);
   assert.strictEqual(h.state, "completed");
   assert.ok(h.result.includes("this morning"), "hangup summary keeps the answer");
   console.log("✔ /hangup: early hangup → summarized from transcript");

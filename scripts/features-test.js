@@ -50,6 +50,7 @@ async function main() {
   const port = await require("./_free-port").freePort();
   process.env.PORT = String(port);
   BASE = `http://127.0.0.1:${port}`;
+  await require("./_reset-db").resetDb();
   require("../src/server");
   await sleep(500);
 

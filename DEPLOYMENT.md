@@ -56,18 +56,18 @@ Also update `PUBLIC_BASE_URL` in the ConfigMap to the real https URL
 
 ## 4. Autoscaling — read this first
 
-`k8s/40-hpa.yaml` exists but **must not be applied yet**: the app uses
-SQLite on a single volume, which supports exactly one writer pod.
-Metrics Server can be installed now (useful for `kubectl top` anyway):
+The app now runs on Postgres (`k8s/05-postgres.yaml`), so the HPA is
+safe to apply. Install Metrics Server first if the cluster lacks it:
 
 ```bash
 kubectl apply -f https://github.com/kubernetes-sigs/metrics-server/releases/latest/download/components.yaml
 ```
 
-Scaling roadmap: migrate `src/db.js` from better-sqlite3 to Postgres
-(managed Postgres or a cluster operator like CloudNativePG), switch the
-Deployment to `RollingUpdate`, then apply the HPA. Happy to do that
-migration as a follow-up — it touches every `*/store.js` file.
+Then: `kubectl apply -f k8s/40-hpa.yaml`. The Deployment already uses
+RollingUpdate. Existing SQLite data can be imported with
+`scripts/migrate-sqlite-to-postgres.js` (usage in the file header).
+Note: the document-files PVC is ReadWriteOnce, so replicas co-locate on
+one node; for multi-node scale-out move files to S3-compatible storage.
 
 ## 5. Monitoring, logs, alerts
 

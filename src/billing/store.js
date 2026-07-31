@@ -1,107 +1,18 @@
 /**
- * BILLING STORE — subscriptions, usage metering, families.
+ * BILLING STORE (Postgres) — subscriptions, usage metering, families.
  *
  * Design notes:
- *  • Usage rows are (user, kind, period) counters — one UPSERT per event,
- *    no per-event rows, so the table stays tiny at any scale and reads
- *    are O(1). Periods: "D:2026-07-29" (daily) and "M:2026-07" (monthly).
+ *  • Usage rows are (user, kind, period) counters — one UPSERT per event.
+ *    Periods: "D:2026-07-29" (daily) and "M:2026-07" (monthly).
  *  • A user's EFFECTIVE plan: own active subscription → that plan; else
  *    member of a family whose owner has an active family sub → family;
  *    else free. Expiry is checked on read — no cron needed.
  *  • Payments are recorded idempotently by payment id (webhooks retry).
+ * Schema lives in src/db.js init().
  */
 const crypto = require("crypto");
-const { db } = require("../db");
+const { query, one, run } = require("../db");
 const { PLANS, PERIOD_DAYS } = require("./plans");
-
-db.exec(`
-  CREATE TABLE IF NOT EXISTS subscriptions (
-    user_id        TEXT PRIMARY KEY,
-    plan           TEXT NOT NULL,             -- pro | family
-    period_end     INTEGER NOT NULL,          -- ms epoch; active while now < this
-    last_payment   TEXT,                      -- razorpay payment id (idempotency)
-    updated_at     INTEGER NOT NULL
-  );
-  CREATE TABLE IF NOT EXISTS usage (
-    user_id   TEXT NOT NULL,
-    kind      TEXT NOT NULL,                  -- chat | stt | vision | agent_min
-    period    TEXT NOT NULL,                  -- D:YYYY-MM-DD | M:YYYY-MM
-    count     INTEGER NOT NULL DEFAULT 0,
-    PRIMARY KEY (user_id, kind, period)
-  );
-  CREATE TABLE IF NOT EXISTS families (
-    id         INTEGER PRIMARY KEY AUTOINCREMENT,
-    owner_id   TEXT NOT NULL UNIQUE,
-    code       TEXT NOT NULL UNIQUE,          -- invite code
-    created_at INTEGER NOT NULL
-  );
-  CREATE TABLE IF NOT EXISTS family_members (
-    family_id  INTEGER NOT NULL,
-    user_id    TEXT NOT NULL UNIQUE,          -- one family per user
-    joined_at  INTEGER NOT NULL,
-    PRIMARY KEY (family_id, user_id)
-  );
-  CREATE TABLE IF NOT EXISTS payments (
-    payment_id TEXT PRIMARY KEY,              -- razorpay id (idempotency)
-    user_id    TEXT NOT NULL,
-    plan       TEXT NOT NULL,
-    amount     INTEGER NOT NULL,
-    created_at INTEGER NOT NULL
-  );
-`);
-
-const stmts = {
-  subGet: db.prepare("SELECT * FROM subscriptions WHERE user_id = ?"),
-  subUpsert: db.prepare(`
-    INSERT INTO subscriptions (user_id, plan, period_end, last_payment, updated_at)
-    VALUES (@user_id, @plan, @period_end, @last_payment, @now)
-    ON CONFLICT(user_id) DO UPDATE SET
-      plan = @plan, period_end = @period_end,
-      last_payment = @last_payment, updated_at = @now
-  `),
-  usageBump: db.prepare(`
-    INSERT INTO usage (user_id, kind, period, count) VALUES (?, ?, ?, ?)
-    ON CONFLICT(user_id, kind, period) DO UPDATE SET count = count + excluded.count
-  `),
-  usageGet: db.prepare(
-    "SELECT count FROM usage WHERE user_id = ? AND kind = ? AND period = ?"
-  ),
-  usageSum: db.prepare(`
-    SELECT COALESCE(SUM(count), 0) AS total FROM usage
-    WHERE kind = ? AND period = ? AND user_id IN
-      (SELECT user_id FROM family_members WHERE family_id = ?
-       UNION SELECT owner_id FROM families WHERE id = ?)
-  `),
-  famByOwner: db.prepare("SELECT * FROM families WHERE owner_id = ?"),
-  famByCode: db.prepare("SELECT * FROM families WHERE code = ?"),
-  famById: db.prepare("SELECT * FROM families WHERE id = ?"),
-  famInsert: db.prepare(
-    "INSERT INTO families (owner_id, code, created_at) VALUES (?, ?, ?)"
-  ),
-  memberOf: db.prepare("SELECT * FROM family_members WHERE user_id = ?"),
-  memberCount: db.prepare(
-    "SELECT COUNT(*) AS n FROM family_members WHERE family_id = ?"
-  ),
-  memberAdd: db.prepare(
-    "INSERT OR IGNORE INTO family_members (family_id, user_id, joined_at) VALUES (?, ?, ?)"
-  ),
-  memberDel: db.prepare("DELETE FROM family_members WHERE user_id = ?"),
-  membersList: db.prepare(
-    "SELECT user_id, joined_at FROM family_members WHERE family_id = ?"
-  ),
-  payGet: db.prepare("SELECT * FROM payments WHERE payment_id = ?"),
-  payAdd: db.prepare(`
-    INSERT OR IGNORE INTO payments (payment_id, user_id, plan, amount, created_at)
-    VALUES (?, ?, ?, ?, ?)
-  `),
-  statUsers: db.prepare("SELECT COUNT(*) AS n FROM users"),
-  statSubs: db.prepare(
-    "SELECT plan, COUNT(*) AS n FROM subscriptions WHERE period_end > ? GROUP BY plan"
-  ),
-  statUsageToday: db.prepare(
-    "SELECT kind, SUM(count) AS total FROM usage WHERE period = ? GROUP BY kind"
-  ),
-};
 
 // ---------------- periods ----------------
 
@@ -113,18 +24,28 @@ function monthPeriod(now = new Date()) {
 }
 const periodFor = (kind) => (kind === "agent_min" ? monthPeriod() : dayPeriod());
 
+// ---------------- small helpers ----------------
+
+const subGet = (userId) =>
+  one("SELECT * FROM subscriptions WHERE user_id = $1", [String(userId)]);
+const famByOwner = (ownerId) =>
+  one("SELECT * FROM families WHERE owner_id = $1", [String(ownerId)]);
+const famByCode = (code) => one("SELECT * FROM families WHERE code = $1", [code]);
+const memberOf = (userId) =>
+  one("SELECT * FROM family_members WHERE user_id = $1", [String(userId)]);
+
 // ---------------- plan resolution ----------------
 
 /** Own active sub, family-derived plan, or free. */
-function effectivePlan(userId) {
+async function effectivePlan(userId) {
   const now = Date.now();
-  const own = stmts.subGet.get(String(userId));
+  const own = await subGet(userId);
   if (own && own.period_end > now) return { plan: own.plan, sub: own, via: "own" };
-  const membership = stmts.memberOf.get(String(userId));
+  const membership = await memberOf(userId);
   if (membership) {
-    const fam = stmts.famById.get(membership.family_id);
+    const fam = await one("SELECT * FROM families WHERE id = $1", [membership.family_id]);
     if (fam) {
-      const ownerSub = stmts.subGet.get(fam.owner_id);
+      const ownerSub = await subGet(fam.owner_id);
       if (ownerSub && ownerSub.plan === "family" && ownerSub.period_end > now) {
         return { plan: "family", sub: ownerSub, via: "family", familyId: fam.id };
       }
@@ -133,38 +54,61 @@ function effectivePlan(userId) {
   return { plan: "free", sub: null, via: "none" };
 }
 
-function activate({ userId, plan, paymentId, amount }) {
+async function activate({ userId, plan, paymentId, amount }) {
   // Idempotent: the same webhook may be delivered more than once.
-  if (paymentId && stmts.payGet.get(paymentId)) return stmts.subGet.get(String(userId));
+  if (paymentId) {
+    const seen = await one("SELECT 1 FROM payments WHERE payment_id = $1", [paymentId]);
+    if (seen) return subGet(userId);
+  }
   const now = Date.now();
-  const existing = stmts.subGet.get(String(userId));
+  const existing = await subGet(userId);
   // Renewals extend from the current expiry, not from today.
   const base = existing && existing.period_end > now ? existing.period_end : now;
-  stmts.subUpsert.run({
-    user_id: String(userId),
-    plan,
-    period_end: base + PERIOD_DAYS * 24 * 3600 * 1000,
-    last_payment: paymentId || null,
-    now,
-  });
-  if (paymentId) stmts.payAdd.run(paymentId, String(userId), plan, amount || 0, now);
-  return stmts.subGet.get(String(userId));
+  await run(
+    `INSERT INTO subscriptions (user_id, plan, period_end, last_payment, updated_at)
+     VALUES ($1, $2, $3, $4, $5)
+     ON CONFLICT (user_id) DO UPDATE SET
+       plan = EXCLUDED.plan, period_end = EXCLUDED.period_end,
+       last_payment = EXCLUDED.last_payment, updated_at = EXCLUDED.updated_at`,
+    [String(userId), plan, base + PERIOD_DAYS * 24 * 3600 * 1000, paymentId || null, now]
+  );
+  if (paymentId) {
+    await run(
+      `INSERT INTO payments (payment_id, user_id, plan, amount, created_at)
+       VALUES ($1, $2, $3, $4, $5) ON CONFLICT (payment_id) DO NOTHING`,
+      [paymentId, String(userId), plan, amount || 0, now]
+    );
+  }
+  return subGet(userId);
 }
 
 // ---------------- usage ----------------
 
-function bump(userId, kind, by = 1) {
-  stmts.usageBump.run(String(userId), kind, periodFor(kind), by);
+async function bump(userId, kind, by = 1) {
+  await run(
+    `INSERT INTO usage (user_id, kind, period, count) VALUES ($1, $2, $3, $4)
+     ON CONFLICT (user_id, kind, period) DO UPDATE SET count = usage.count + EXCLUDED.count`,
+    [String(userId), kind, periodFor(kind), by]
+  );
 }
 
-function used(userId, kind) {
-  const row = stmts.usageGet.get(String(userId), kind, periodFor(kind));
+async function used(userId, kind) {
+  const row = await one(
+    "SELECT count FROM usage WHERE user_id = $1 AND kind = $2 AND period = $3",
+    [String(userId), kind, periodFor(kind)]
+  );
   return row ? row.count : 0;
 }
 
 /** Family-pooled usage (agent minutes) — sums every member incl. owner. */
-function usedPooled(familyId, kind) {
-  const row = stmts.usageSum.get(kind, periodFor(kind), familyId, familyId);
+async function usedPooled(familyId, kind) {
+  const row = await one(
+    `SELECT COALESCE(SUM(count), 0)::int AS total FROM usage
+     WHERE kind = $1 AND period = $2 AND user_id IN
+       (SELECT user_id FROM family_members WHERE family_id = $3
+        UNION SELECT owner_id FROM families WHERE id = $3)`,
+    [kind, periodFor(kind), familyId]
+  );
   return row ? row.total : 0;
 }
 
@@ -172,8 +116,8 @@ function usedPooled(familyId, kind) {
  * Remaining allowance for [kind]; Infinity when unlimited.
  * Family agent minutes draw from the shared pool.
  */
-function remaining(userId, kind) {
-  const eff = effectivePlan(userId);
+async function remaining(userId, kind) {
+  const eff = await effectivePlan(userId);
   const limits = PLANS[eff.plan];
   const limitKey = {
     chat: "chatPerDay",
@@ -187,75 +131,95 @@ function remaining(userId, kind) {
   if (kind === "agent_min" && eff.plan === "family") {
     // The pool covers the OWNER too, not just joined members.
     let famId = eff.familyId;
-    if (!famId) famId = stmts.famByOwner.get(String(userId))?.id;
-    consumed = famId ? usedPooled(famId, kind) : used(userId, kind);
+    if (!famId) famId = (await famByOwner(userId))?.id;
+    consumed = famId ? await usedPooled(famId, kind) : await used(userId, kind);
   } else {
-    consumed = used(userId, kind);
+    consumed = await used(userId, kind);
   }
   return { left: Math.max(0, limit - consumed), limit, plan: eff.plan };
 }
 
 // ---------------- families ----------------
 
-function createOrGetFamily(ownerId) {
-  let fam = stmts.famByOwner.get(String(ownerId));
+async function createOrGetFamily(ownerId) {
+  let fam = await famByOwner(ownerId);
   if (fam) return fam;
   // Unambiguous invite code (no 0/O/1/I lookalikes).
   const alphabet = "ABCDEFGHJKMNPQRSTUVWXYZ23456789";
   let code;
   do {
     code = Array.from(crypto.randomBytes(6), (b) => alphabet[b % alphabet.length]).join("");
-  } while (stmts.famByCode.get(code));
-  stmts.famInsert.run(String(ownerId), code, Date.now());
-  return stmts.famByOwner.get(String(ownerId));
+  } while (await famByCode(code));
+  await run("INSERT INTO families (owner_id, code, created_at) VALUES ($1, $2, $3)", [
+    String(ownerId), code, Date.now(),
+  ]);
+  return famByOwner(ownerId);
 }
 
-function joinFamily(userId, code) {
-  const fam = stmts.famByCode.get(String(code).toUpperCase().trim());
+async function joinFamily(userId, code) {
+  const fam = await famByCode(String(code).toUpperCase().trim());
   if (!fam) return { error: "invalid code" };
   if (fam.owner_id === String(userId)) return { error: "you own this family" };
-  const ownerSub = stmts.subGet.get(fam.owner_id);
+  const ownerSub = await subGet(fam.owner_id);
   if (!ownerSub || ownerSub.plan !== "family" || ownerSub.period_end < Date.now()) {
     return { error: "this family plan is not active" };
   }
   const seats = PLANS.family.familySeats;
-  const count = stmts.memberCount.get(fam.id).n + 1; // +1 = the owner
+  const count =
+    (await one("SELECT COUNT(*)::int AS n FROM family_members WHERE family_id = $1", [fam.id])).n + 1; // +1 = the owner
   if (count >= seats) return { error: "family is full" };
-  stmts.memberDel.run(String(userId)); // moving families: leave the old one
-  stmts.memberAdd.run(fam.id, String(userId), Date.now());
+  await run("DELETE FROM family_members WHERE user_id = $1", [String(userId)]); // moving families: leave the old one
+  await run(
+    `INSERT INTO family_members (family_id, user_id, joined_at) VALUES ($1, $2, $3)
+     ON CONFLICT (user_id) DO NOTHING`,
+    [fam.id, String(userId), Date.now()]
+  );
   return { family: fam };
 }
 
-function leaveFamily(userId) {
-  stmts.memberDel.run(String(userId));
+async function leaveFamily(userId) {
+  await run("DELETE FROM family_members WHERE user_id = $1", [String(userId)]);
 }
 
-function familyInfo(userId) {
-  const owned = stmts.famByOwner.get(String(userId));
+async function familyInfo(userId) {
+  const owned = await famByOwner(userId);
   if (owned) {
+    const members = await query(
+      "SELECT user_id, joined_at FROM family_members WHERE family_id = $1",
+      [owned.id]
+    );
     return {
       role: "owner",
       code: owned.code,
-      members: stmts.membersList.all(owned.id).length + 1,
+      members: members.length + 1,
       seats: PLANS.family.familySeats,
     };
   }
-  const m = stmts.memberOf.get(String(userId));
+  const m = await memberOf(userId);
   if (m) return { role: "member" };
   return null;
 }
 
 // ---------------- admin stats ----------------
 
-function stats() {
+async function stats() {
   const subs = {};
-  for (const r of stmts.statSubs.all(Date.now())) subs[r.plan] = r.n;
+  for (const r of await query(
+    "SELECT plan, COUNT(*)::int AS n FROM subscriptions WHERE period_end > $1 GROUP BY plan",
+    [Date.now()]
+  )) subs[r.plan] = r.n;
   const usageToday = {};
-  for (const r of stmts.statUsageToday.all(dayPeriod())) usageToday[r.kind] = r.total;
-  const agentMonth = stmts.statUsageToday.all(monthPeriod());
+  for (const r of await query(
+    "SELECT kind, SUM(count)::int AS total FROM usage WHERE period = $1 GROUP BY kind",
+    [dayPeriod()]
+  )) usageToday[r.kind] = r.total;
+  const agentMonth = await query(
+    "SELECT kind, SUM(count)::int AS total FROM usage WHERE period = $1 GROUP BY kind",
+    [monthPeriod()]
+  );
   for (const r of agentMonth) if (r.kind === "agent_min") usageToday.agent_min_month = r.total;
   return {
-    users: stmts.statUsers.get().n,
+    users: (await one("SELECT COUNT(*)::int AS n FROM users")).n,
     activeSubscriptions: subs,
     usageToday,
   };

@@ -34,20 +34,20 @@ router.use(express.urlencoded({ extended: false }));
 // ---------------- app-facing ----------------
 
 // ---- G2: the user's calling rules ----
-router.get("/settings", (req, res) => {
-  const st = store.getSettings(req.user.sub);
+router.get("/settings", async (req, res) => {
+  const st = await store.getSettings(req.user.sub);
   res.json({
     enabled: !!st.enabled,
     dailyLimit: st.daily_limit,
     hoursStart: st.hours_start,
     hoursEnd: st.hours_end,
-    usedToday: store.countToday(req.user.sub, tz(req)),
+    usedToday: await store.countToday(req.user.sub, tz(req)),
   });
 });
 
-router.put("/settings", (req, res) => {
+router.put("/settings", async (req, res) => {
   const b = req.body || {};
-  const st = store.setSettings(req.user.sub, {
+  const st = await store.setSettings(req.user.sub, {
     enabled: b.enabled,
     daily_limit: b.dailyLimit,
     hours_start: b.hoursStart,
@@ -70,8 +70,8 @@ router.post("/preview", async (req, res) => {
   if (!name || !what) {
     return res.status(400).json({ error: "contactName and task required" });
   }
-  const rule = checkRules(req);
-  const user = findById(Number(req.user.sub));
+  const rule = await checkRules(req);
+  const user = await findById(Number(req.user.sub));
   const opening = await engine.openingLine(
     { contact_name: name, task: what, lang: String(lang || "en-IN") },
     user?.name
@@ -85,8 +85,8 @@ const tz = (req) => {
 };
 
 /** null when the call may proceed; else a ready-to-speak refusal. */
-function checkRules(req) {
-  const st = store.getSettings(req.user.sub);
+async function checkRules(req) {
+  const st = await store.getSettings(req.user.sub);
   if (!st.enabled) {
     return "AI calling is switched off in your call settings.";
   }
@@ -95,7 +95,7 @@ function checkRules(req) {
   if (hour < st.hours_start || hour >= st.hours_end) {
     return `Your call rules only allow calls between ${st.hours_start}:00 and ${st.hours_end}:00 — I'll hold off.`;
   }
-  if (store.countToday(req.user.sub, t) >= st.daily_limit) {
+  if ((await store.countToday(req.user.sub, t)) >= st.daily_limit) {
     return `You've reached your daily limit of ${st.daily_limit} AI calls. You can raise it in call settings.`;
   }
   return null;
@@ -109,7 +109,7 @@ router.post("/", async (req, res) => {
         "PLIVO_AUTH_TOKEN, PLIVO_FROM_NUMBER and PUBLIC_BASE_URL",
     });
   }
-  const ruleBlock = checkRules(req); // G2 — user-set limits, hours, master switch
+  const ruleBlock = await checkRules(req); // G2 — user-set limits, hours, master switch
   if (ruleBlock) {
     return res.status(403).json({ error: "call_rules", say: ruleBlock });
   }
@@ -122,7 +122,7 @@ router.post("/", async (req, res) => {
     return res.status(400).json({ error: "contactName and task required" });
   }
 
-  const call = store.create({
+  const call = await store.create({
     userId: req.user.sub,
     contactName: name,
     toNumber: to,
@@ -132,18 +132,18 @@ router.post("/", async (req, res) => {
 
   try {
     const uuid = await plivo.createCall({ to, callId: call.id });
-    store.setProviderId(call.id, uuid);
-    store.setState(call.id, "dialing");
+    await store.setProviderId(call.id, uuid);
+    await store.setState(call.id, "dialing");
     res.status(202).json({ id: call.id, state: "dialing" });
   } catch (e) {
     console.error("agent-call create failed:", e.message);
-    store.setResult(call.id, null, "failed");
+    await store.setResult(call.id, null, "failed");
     res.status(502).json({ error: "could not place the call" });
   }
 });
 
-router.get("/:id", (req, res) => {
-  const call = store.get(req.params.id);
+router.get("/:id", async (req, res) => {
+  const call = await store.get(req.params.id);
   if (!call || String(call.user_id) !== String(req.user.sub)) {
     return res.status(404).json({ error: "not found" });
   }
@@ -160,12 +160,12 @@ router.get("/:id", (req, res) => {
 // ---------------- Plivo webhooks ----------------
 
 /** Signature + call-exists guard shared by all webhooks. */
-function webhookGuard(req, res) {
+async function webhookGuard(req, res) {
   if (!plivo.validSignature(req)) {
     res.status(403).type("text/plain").send("bad signature");
     return null;
   }
-  const call = store.get(req.params.id);
+  const call = await store.get(req.params.id);
   if (!call) {
     res.status(404).type("text/plain").send("unknown call");
     return null;
@@ -181,15 +181,15 @@ const inputUrl = (id) =>
  *  (Voicemail never reaches here — machine_detection=hangup ends those
  *  calls at Plivo; /hangup then marks them no_answer.) */
 router.post("/plivo/:id/answer", async (req, res) => {
-  const call = webhookGuard(req, res);
+  const call = await webhookGuard(req, res);
   if (!call) return;
 
-  store.setState(call.id, "in_progress");
+  await store.setState(call.id, "in_progress");
   const user = /^\d+$/.test(String(call.user_id))
-    ? findById(Number(call.user_id))
+    ? await findById(Number(call.user_id))
     : null;
   const opening = await engine.openingLine(call, user?.name);
-  store.addTurn(call.id, "agent", opening);
+  await store.addTurn(call.id, "agent", opening);
   res.type("text/xml").send(
     plivo.xmlSpeakGetInput({
       text: opening,
@@ -201,28 +201,28 @@ router.post("/plivo/:id/answer", async (req, res) => {
 
 /** The contact spoke (or stayed silent): AI decides the next line. */
 router.post("/plivo/:id/input", async (req, res) => {
-  const call = webhookGuard(req, res);
+  const call = await webhookGuard(req, res);
   if (!call) return;
 
   const heard = String(req.body.Speech || req.body.speech || "").trim();
-  if (heard) store.addTurn(call.id, "contact", heard);
+  if (heard) await store.addTurn(call.id, "contact", heard);
 
   // Silence twice in a row → give up gracefully instead of looping.
   const silentBefore = !heard && call.transcript.at(-1)?.who === "agent";
   if (!heard && silentBefore && call.transcript.length > 2) {
     const bye = "I couldn't hear you clearly. I'll let them know I called. Goodbye!";
-    store.addTurn(call.id, "agent", bye);
+    await store.addTurn(call.id, "agent", bye);
     finishCall(call.id);
     return res
       .type("text/xml")
       .send(plivo.xmlSpeakHangup({ text: bye, lang: call.lang }));
   }
 
-  const fresh = store.get(call.id);
+  const fresh = await store.get(call.id);
   const turn = heard
     ? await engine.nextTurn(fresh, heard)
     : { say: "Sorry, could you say that again?", done: false };
-  store.addTurn(call.id, "agent", turn.say);
+  await store.addTurn(call.id, "agent", turn.say);
 
   if (turn.done) {
     finishCall(call.id);
@@ -240,8 +240,8 @@ router.post("/plivo/:id/input", async (req, res) => {
 });
 
 /** The call ended — any reason, either side. */
-router.post("/plivo/:id/hangup", (req, res) => {
-  const call = webhookGuard(req, res);
+router.post("/plivo/:id/hangup", async (req, res) => {
+  const call = await webhookGuard(req, res);
   if (!call) return;
 
   // Meter REAL talk time against the user's plan (family pool included).
@@ -261,7 +261,7 @@ router.post("/plivo/:id/hangup", (req, res) => {
   if (store.isDone(call.state)) {
     // already terminal (we hung up after finishing) — nothing to do
   } else if (call.state === "dialing" && notAnswered) {
-    store.setResult(
+    await store.setResult(
       call.id,
       machine
         ? `${call.contact_name} didn't pick up — the call went to voicemail.`
@@ -269,7 +269,7 @@ router.post("/plivo/:id/hangup", (req, res) => {
       "no_answer"
     );
   } else if (call.state === "dialing") {
-    store.setResult(
+    await store.setResult(
       call.id,
       `I couldn't reach ${call.contact_name} — the call failed.`,
       "failed"
@@ -282,10 +282,10 @@ router.post("/plivo/:id/hangup", (req, res) => {
 });
 
 /** Fire-and-forget: generate the user-facing summary, mark completed. */
-function finishCall(id) {
-  const call = store.get(id);
+async function finishCall(id) {
+  const call = await store.get(id);
   if (!call || store.isDone(call.state)) return;
-  store.setState(id, "summarizing");
+  await store.setState(id, "summarizing");
   engine
     .summarize(call)
     .then((summary) => store.setResult(id, summary, "completed"))

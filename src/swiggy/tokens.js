@@ -7,7 +7,7 @@
  *
  * The MCP spec mandates discovery + Dynamic Client Registration, so there
  * is no client id to configure — we register ourselves once and cache the
- * registration in SQLite (kv table). Everything is lazy + cached:
+ * registration in Postgres (kv table). Everything is lazy + cached:
  * metadata 24 h, access tokens until 60 s before expiry.
  *
  * Env:
@@ -15,44 +15,7 @@
  *   SWIGGY_REDIRECT_URI  e.g. http://localhost:3000/swiggy/callback (dev)
  */
 const crypto = require("crypto");
-const { db } = require("../db");
-
-db.exec(`
-  CREATE TABLE IF NOT EXISTS swiggy_tokens (
-    user_id       INTEGER PRIMARY KEY,
-    refresh_token TEXT NOT NULL,
-    access_token  TEXT,
-    expires_at    INTEGER,
-    updated_at    INTEGER NOT NULL
-  );
-  CREATE TABLE IF NOT EXISTS kv (
-    k TEXT PRIMARY KEY,
-    v TEXT NOT NULL
-  );
-`);
-
-const stmts = {
-  get: db.prepare("SELECT * FROM swiggy_tokens WHERE user_id = ?"),
-  upsert: db.prepare(`
-    INSERT INTO swiggy_tokens (user_id, refresh_token, access_token, expires_at, updated_at)
-    VALUES (@user_id, @refresh_token, @access_token, @expires_at, @updated_at)
-    ON CONFLICT(user_id) DO UPDATE SET
-      refresh_token = excluded.refresh_token,
-      access_token  = excluded.access_token,
-      expires_at    = excluded.expires_at,
-      updated_at    = excluded.updated_at
-  `),
-  setAccess: db.prepare(
-    "UPDATE swiggy_tokens SET access_token = ?, expires_at = ?, refresh_token = ?, updated_at = ? WHERE user_id = ?"
-  ),
-  del: db.prepare("DELETE FROM swiggy_tokens WHERE user_id = ?"),
-  kvGet: db.prepare("SELECT v FROM kv WHERE k = ?"),
-  kvSet: db.prepare(
-    "INSERT INTO kv (k, v) VALUES (?, ?) ON CONFLICT(k) DO UPDATE SET v = excluded.v"
-  ),
-  kvDel: db.prepare("DELETE FROM kv WHERE k = ?"),
-  kvAllPending: db.prepare("SELECT k, v FROM kv WHERE k LIKE 'swiggy_pending:%'"),
-};
+const { query, one, run } = require("../db");
 
 const BASE = () => (process.env.SWIGGY_MCP_BASE || "https://mcp.swiggy.com").replace(/\/$/, "");
 // Redirect URI resolution order:
@@ -110,7 +73,7 @@ async function metadata() {
 // ---- Dynamic Client Registration (once, persisted in kv) ----
 async function clientReg() {
   const scope = await scopeString();
-  const row = stmts.kvGet.get("swiggy_client");
+  const row = await one("SELECT v FROM kv WHERE k = $1", ["swiggy_client"]);
   if (row) {
     const c = JSON.parse(row.v);
     // Re-register when the redirect or requested scopes changed.
@@ -131,7 +94,10 @@ async function clientReg() {
     }),
   });
   c._requested_scope = scope; // our fingerprint, not part of the server reply
-  stmts.kvSet.run("swiggy_client", JSON.stringify(c));
+  await run(
+    "INSERT INTO kv (k, v) VALUES ($1, $2) ON CONFLICT (k) DO UPDATE SET v = EXCLUDED.v",
+    ["swiggy_client", JSON.stringify(c)]
+  );
   return c;
 }
 
@@ -143,31 +109,33 @@ async function clientReg() {
 // mid-OTP with "link expired".
 const PENDING_TTL = 600_000;
 const pendingKey = (state) => `swiggy_pending:${state}`;
-function pendingSet(state, data) {
-  stmts.kvSet.run(pendingKey(state), JSON.stringify(data));
+async function pendingSet(state, data) {
+  await run(
+    "INSERT INTO kv (k, v) VALUES ($1, $2) ON CONFLICT (k) DO UPDATE SET v = EXCLUDED.v",
+    [pendingKey(state), JSON.stringify(data)]
+  );
 }
-function pendingTake(state) {
+async function pendingTake(state) {
   // Read-and-delete in one step: a state is single-use.
-  const row = stmts.kvGet.get(pendingKey(state));
+  const row = await one("DELETE FROM kv WHERE k = $1 RETURNING v", [pendingKey(state)]);
   if (!row) return null;
-  stmts.kvDel.run(pendingKey(state));
   const p = JSON.parse(row.v);
   return Date.now() - p.at > PENDING_TTL ? null : p;
 }
-function sweepPending() {
+async function sweepPending() {
   const cutoff = Date.now() - PENDING_TTL;
-  for (const { k, v } of stmts.kvAllPending.all()) {
+  for (const { k, v } of await query("SELECT k, v FROM kv WHERE k LIKE 'swiggy_pending:%'")) {
     try {
-      if (JSON.parse(v).at < cutoff) stmts.kvDel.run(k);
+      if (JSON.parse(v).at < cutoff) await run("DELETE FROM kv WHERE k = $1", [k]);
     } catch {
-      stmts.kvDel.run(k);
+      await run("DELETE FROM kv WHERE k = $1", [k]);
     }
   }
 }
 
 /** Step 1: build the browser URL the app should open. */
 async function beginLink(userId) {
-  sweepPending();
+  await sweepPending();
   // Better a clear error than a browser tab pointing at localhost.
   if (process.env.NODE_ENV === "production" && REDIRECT().includes("localhost")) {
     throw new Error("swiggy: set PUBLIC_BASE_URL or SWIGGY_REDIRECT_URI in production");
@@ -175,7 +143,7 @@ async function beginLink(userId) {
   const [meta, client] = await Promise.all([metadata(), clientReg()]);
   const verifier = b64url(crypto.randomBytes(32));
   const state = b64url(crypto.randomBytes(16));
-  pendingSet(state, { userId, verifier, at: Date.now() });
+  await pendingSet(state, { userId, verifier, at: Date.now() });
   const u = new URL(meta.authorization_endpoint);
   u.searchParams.set("response_type", "code");
   u.searchParams.set("client_id", client.client_id);
@@ -189,7 +157,7 @@ async function beginLink(userId) {
 
 /** Step 2: the OAuth callback exchanges code → tokens. Returns userId. */
 async function completeLink(state, code) {
-  const p = pendingTake(state);
+  const p = await pendingTake(state);
   if (!p) throw new Error("swiggy: link expired — try again");
   const [meta, client] = await Promise.all([metadata(), clientReg()]);
   const t = await jfetch(meta.token_endpoint, {
@@ -207,27 +175,31 @@ async function completeLink(state, code) {
   // an access-token-only link is better than no link: store it with an
   // empty refresh token and let accessToken() serve it until expiry.
   if (!t.refresh_token && !t.access_token) throw new Error("swiggy: no tokens returned");
-  stmts.upsert.run({
-    user_id: p.userId,
-    refresh_token: t.refresh_token || "",
-    access_token: t.access_token || null,
-    expires_at: t.expires_in ? Date.now() + t.expires_in * 1000 : null,
-    updated_at: Date.now(),
-  });
+  await run(
+    `INSERT INTO swiggy_tokens (user_id, refresh_token, access_token, expires_at, updated_at)
+     VALUES ($1, $2, $3, $4, $5)
+     ON CONFLICT (user_id) DO UPDATE SET
+       refresh_token = EXCLUDED.refresh_token,
+       access_token  = EXCLUDED.access_token,
+       expires_at    = EXCLUDED.expires_at,
+       updated_at    = EXCLUDED.updated_at`,
+    [p.userId, t.refresh_token || "", t.access_token || null,
+     t.expires_in ? Date.now() + t.expires_in * 1000 : null, Date.now()]
+  );
   return p.userId;
 }
 
-function isLinked(userId) {
-  return !!stmts.get.get(userId);
+async function isLinked(userId) {
+  return !!(await one("SELECT 1 FROM swiggy_tokens WHERE user_id = $1", [userId]));
 }
 
-function unlink(userId) {
-  stmts.del.run(userId);
+async function unlink(userId) {
+  await run("DELETE FROM swiggy_tokens WHERE user_id = $1", [userId]);
 }
 
 /** Valid access token for the user; refreshes when < 60 s of life left. */
 async function accessToken(userId) {
-  const row = stmts.get.get(userId);
+  const row = await one("SELECT * FROM swiggy_tokens WHERE user_id = $1", [userId]);
   if (!row) return null;
   if (row.access_token && row.expires_at && row.expires_at - Date.now() > 60_000) {
     return row.access_token;
@@ -236,7 +208,7 @@ async function accessToken(userId) {
   // there is nothing to refresh with — drop the row so /status shows
   // "not linked" and the user re-links instead of getting silent 401s.
   if (!row.refresh_token) {
-    stmts.del.run(userId);
+    await run("DELETE FROM swiggy_tokens WHERE user_id = $1", [userId]);
     return null;
   }
   const [meta, client] = await Promise.all([metadata(), clientReg()]);
@@ -250,16 +222,14 @@ async function accessToken(userId) {
     }).toString(),
   }).catch((e) => {
     // Refresh token revoked/expired → force a fresh link instead of looping.
-    if (/40[01]/.test(e.message)) { stmts.del.run(userId); return null; }
+    if (/40[01]/.test(e.message)) { return run("DELETE FROM swiggy_tokens WHERE user_id = $1", [userId]).then(() => null); }
     throw e;
   });
   if (!t) return null;
-  stmts.setAccess.run(
-    t.access_token,
-    t.expires_in ? Date.now() + t.expires_in * 1000 : null,
-    t.refresh_token || row.refresh_token, // rotation-safe
-    Date.now(),
-    userId
+  await run(
+    "UPDATE swiggy_tokens SET access_token = $1, expires_at = $2, refresh_token = $3, updated_at = $4 WHERE user_id = $5",
+    [t.access_token, t.expires_in ? Date.now() + t.expires_in * 1000 : null,
+     t.refresh_token || row.refresh_token /* rotation-safe */, Date.now(), userId]
   );
   return t.access_token;
 }

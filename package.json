@@ -1,7 +1,7 @@
 {
   "name": "myassistant-backend",
   "version": "0.1.0",
-  "description": "MYASSISTANT backend \u2014 AI routing, remote config, user services",
+  "description": "MYASSISTANT backend — AI routing, remote config, user services",
   "main": "src/server.js",
   "scripts": {
     "start": "node src/server.js",
@@ -13,7 +13,6 @@
   },
   "dependencies": {
     "bcryptjs": "^3.0.3",
-    "better-sqlite3": "^12.11.1",
     "chrono-node": "^2.10.0",
     "dotenv": "^16.4.5",
     "express": "^4.19.2",
@@ -22,6 +21,7 @@
     "helmet": "^7.1.0",
     "jose": "^6.2.3",
     "jsonwebtoken": "^9.0.3",
-    "multer": "^2.2.0"
+    "multer": "^2.2.0",
+    "pg": "^8.22.0"
   }
 }
