@@ -25,40 +25,40 @@ const shape = (r) => ({
   createdAt: r.created_at,
 });
 
-router.get("/", (req, res) => {
+router.get("/", async (req, res) => {
   const id = uid(req, res);
   if (id === null) return;
-  res.json({ reminders: store.list(id).map(shape) });
+  res.json({ reminders: (await store.list(id)).map(shape) });
 });
 
-router.post("/", (req, res) => {
+router.post("/", async (req, res) => {
   const id = uid(req, res);
   if (id === null) return;
   const { text, dueAt } = req.body || {};
-  const r = store.create(id, text, Number.isFinite(dueAt) ? dueAt : null);
+  const r = await store.create(id, text, Number.isFinite(dueAt) ? dueAt : null);
   if (!r) return res.status(400).json({ error: "text required" });
   res.json({ reminder: shape(r) });
 });
 
-router.patch("/:id", (req, res) => {
+router.patch("/:id", async (req, res) => {
   const id = uid(req, res);
   if (id === null) return;
   const rid = Number(req.params.id);
   const { done, text, dueAt } = req.body || {};
-  if (done !== undefined) store.setDone(id, rid, !!done);
+  if (done !== undefined) await store.setDone(id, rid, !!done);
   let r = null;
   if (text !== undefined || dueAt !== undefined) {
-    r = store.update(id, rid, text, dueAt === undefined ? undefined : dueAt);
+    r = await store.update(id, rid, text, dueAt === undefined ? undefined : dueAt);
   }
-  r = r || store.list(id).find((x) => x.id === rid);
+  r = r || (await store.list(id)).find((x) => x.id === rid);
   if (!r) return res.status(404).json({ error: "not found" });
   res.json({ reminder: shape(r) });
 });
 
-router.delete("/:id", (req, res) => {
+router.delete("/:id", async (req, res) => {
   const id = uid(req, res);
   if (id === null) return;
-  const ok = store.remove(id, Number(req.params.id));
+  const ok = await store.remove(id, Number(req.params.id));
   res.status(ok ? 200 : 404).json(ok ? { ok: true } : { error: "not found" });
 });
 

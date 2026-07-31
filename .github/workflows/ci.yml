@@ -9,6 +9,23 @@ on:
 jobs:
   test:
     runs-on: ubuntu-latest
+    # Real Postgres for the suite (the app no longer uses SQLite).
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: myassistant
+          POSTGRES_PASSWORD: ci
+          POSTGRES_DB: myassistant
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U myassistant -d myassistant"
+          --health-interval 3s
+          --health-timeout 3s
+          --health-retries 15
+    env:
+      DATABASE_URL: postgres://myassistant:ci@localhost:5432/myassistant
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
@@ -19,7 +36,7 @@ jobs:
       # Every route module must at least LOAD (catches typos/bad requires).
       - name: Module load check
         run: |
-          JWT_SECRET=$(head -c 48 /dev/urandom | base64) node -e "
+          JWT_SECRET=$(head -c 48 /dev/urandom | base64) DATABASE_URL=$DATABASE_URL node -e "
             for (const m of ['./src/routes/chat','./src/routes/auth','./src/routes/memory',
                              './src/reminders/routes','./src/google/routes','./src/routes/stt',
                              './src/services/intents','./src/memory/extractor']) require(m);

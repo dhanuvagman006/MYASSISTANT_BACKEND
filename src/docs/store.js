@@ -1,24 +1,23 @@
 /**
- * PER-USER DOCUMENT STORE — Group B upgrade: "the agent remembers".
- * -----------------------------------------------------------------
+ * PER-USER DOCUMENT STORE (Postgres) — "the agent remembers".
+ * -----------------------------------------------------------
  * Hospital reports, prescriptions, receipts, results… the user saves a
  * photo/PDF once, Hari keeps it forever and can PULL IT BACK UP from a
  * voice request ("show me the report from my last hospital visit").
  *
  * Layout:
- *   • metadata + AI summary → SQLite row (documents table)
- *   • full-text search      → FTS5 index kept in sync by triggers
- *     (BM25-ranked, millisecond lookups even with millions of rows —
- *     matching is done in the index, never by scanning summaries)
+ *   • metadata + AI summary → documents table (schema in src/db.js)
+ *   • full-text search      → tsvector generated column + GIN index
+ *     (was SQLite FTS5; matching happens in the index, never by scan)
  *   • file bytes            → DATA_DIR/files/<userId>/<docId>.<ext>
- *     (never in SQLite — keeps the DB small and backups cheap)
+ *     (never in the DB — keeps it small and backups cheap)
  *
  * Everything is user-visible and user-deletable, same contract as the
  * facts memory: no hidden state.
  */
 const fs = require("fs");
 const path = require("path");
-const { db } = require("../db");
+const { query, one, run } = require("../db");
 
 const MAX_PER_USER = 100; // oldest doc evicted when full
 
@@ -28,85 +27,7 @@ const filesRoot = path.join(
 );
 fs.mkdirSync(filesRoot, { recursive: true });
 
-db.exec(`
-  CREATE TABLE IF NOT EXISTS documents (
-    id         INTEGER PRIMARY KEY AUTOINCREMENT,
-    user_id    INTEGER NOT NULL,
-    filename   TEXT NOT NULL,
-    mime       TEXT NOT NULL,
-    size       INTEGER NOT NULL,
-    path       TEXT NOT NULL,               -- absolute path on disk
-    title      TEXT NOT NULL DEFAULT '',    -- AI: "Blood test report — City Hospital"
-    category   TEXT NOT NULL DEFAULT 'other', -- medical|prescription|receipt|bill|id|ticket|other
-    doc_date   TEXT NOT NULL DEFAULT '',    -- ISO yyyy-mm-dd from the document itself
-    summary    TEXT NOT NULL DEFAULT '',    -- AI plain-language summary (searchable)
-    note       TEXT NOT NULL DEFAULT '',    -- user's own words, e.g. doctor's suggestions
-    tags       TEXT NOT NULL DEFAULT '',    -- "hospital, diabetes, dr rao"
-    created_at INTEGER NOT NULL
-  );
-  CREATE INDEX IF NOT EXISTS idx_docs_user ON documents(user_id, created_at DESC);
-`);
 
-// MIGRATION (idempotent): full document text, extracted once at analysis
-// time, so "read me what's on the receipt" answers from the REAL content
-// with zero extra AI calls at recall.
-try {
-  db.exec(`ALTER TABLE documents ADD COLUMN full_text TEXT NOT NULL DEFAULT ''`);
-} catch (_) { /* column already exists */ }
-
-db.exec(`
-  CREATE VIRTUAL TABLE IF NOT EXISTS docs_fts USING fts5(
-    title, summary, note, tags, filename,
-    content='documents', content_rowid='id', tokenize='unicode61'
-  );
-  CREATE TRIGGER IF NOT EXISTS docs_ai AFTER INSERT ON documents BEGIN
-    INSERT INTO docs_fts(rowid, title, summary, note, tags, filename)
-    VALUES (new.id, new.title, new.summary, new.note, new.tags, new.filename);
-  END;
-  CREATE TRIGGER IF NOT EXISTS docs_ad AFTER DELETE ON documents BEGIN
-    INSERT INTO docs_fts(docs_fts, rowid, title, summary, note, tags, filename)
-    VALUES ('delete', old.id, old.title, old.summary, old.note, old.tags, old.filename);
-  END;
-  CREATE TRIGGER IF NOT EXISTS docs_au AFTER UPDATE ON documents BEGIN
-    INSERT INTO docs_fts(docs_fts, rowid, title, summary, note, tags, filename)
-    VALUES ('delete', old.id, old.title, old.summary, old.note, old.tags, old.filename);
-    INSERT INTO docs_fts(rowid, title, summary, note, tags, filename)
-    VALUES (new.id, new.title, new.summary, new.note, new.tags, new.filename);
-  END;
-`);
-
-const stmts = {
-  insert: db.prepare(`
-    INSERT INTO documents (user_id, filename, mime, size, path, note, category, created_at)
-    VALUES (@user_id, @filename, @mime, @size, @path, @note, @category, @now)
-  `),
-  setMeta: db.prepare(`
-    UPDATE documents SET title=@title, category=@category, doc_date=@doc_date,
-      summary=@summary, tags=@tags, full_text=@full_text
-      WHERE id=@id AND user_id=@user_id
-  `),
-  setNote: db.prepare(
-    "UPDATE documents SET note=? WHERE id=? AND user_id=?"
-  ),
-  byId: db.prepare("SELECT * FROM documents WHERE id=? AND user_id=?"),
-  list: db.prepare(
-    "SELECT * FROM documents WHERE user_id=? ORDER BY created_at DESC LIMIT ?"
-  ),
-  count: db.prepare("SELECT COUNT(*) AS n FROM documents WHERE user_id=?"),
-  oldest: db.prepare(
-    "SELECT * FROM documents WHERE user_id=? ORDER BY created_at ASC LIMIT 1"
-  ),
-  del: db.prepare("DELETE FROM documents WHERE id=? AND user_id=?"),
-  recentByCat: db.prepare(`
-    SELECT * FROM documents WHERE user_id=? AND category IN (?, ?)
-    ORDER BY COALESCE(NULLIF(doc_date,''), '0') DESC, created_at DESC LIMIT ?
-  `),
-  search: db.prepare(`
-    SELECT d.* FROM docs_fts f JOIN documents d ON d.id = f.rowid
-    WHERE docs_fts MATCH ? AND d.user_id = ?
-    ORDER BY rank LIMIT ?
-  `),
-};
 
 function userDir(userId) {
   const dir = path.join(filesRoot, String(userId));
@@ -136,69 +57,71 @@ function guessCategory(note) {
 }
 
 /** Save the file bytes + a metadata row. Returns the new row. */
-function createDocument(userId, { buffer, filename, mime, note = "" }) {
+async function createDocument(userId, { buffer, filename, mime, note = "" }) {
   // Cap: evict the oldest document (and its file) when the user is full.
-  if (stmts.count.get(userId).n >= MAX_PER_USER) {
-    const old = stmts.oldest.get(userId);
-    if (old) deleteDocument(userId, old.id);
+  if ((await countDocuments(userId)) >= MAX_PER_USER) {
+    const old = await one(
+      "SELECT * FROM documents WHERE user_id = $1 ORDER BY created_at ASC LIMIT 1",
+      [userId]
+    );
+    if (old) await deleteDocument(userId, old.id);
   }
-  const info = stmts.insert.run({
-    user_id: userId,
-    filename: String(filename || "document").slice(0, 120),
-    mime,
-    size: buffer.length,
-    path: "", // set right after — we need the id for the filename
-    note: String(note || "").trim().slice(0, 2000),
-    category: guessCategory(note),
-    now: Date.now(),
-  });
-  const id = info.lastInsertRowid;
+  const row = await one(
+    `INSERT INTO documents (user_id, filename, mime, size, path, note, category, created_at)
+     VALUES ($1, $2, $3, $4, '', $5, $6, $7) RETURNING id`,
+    [userId, String(filename || "document").slice(0, 120), mime, buffer.length,
+     String(note || "").trim().slice(0, 2000), guessCategory(note), Date.now()]
+  );
+  const id = row.id;
   const filePath = path.join(userDir(userId), id + extOf(mime, filename));
   fs.writeFileSync(filePath, buffer);
-  db.prepare("UPDATE documents SET path=? WHERE id=?").run(filePath, id);
-  return stmts.byId.get(id, userId);
+  await run("UPDATE documents SET path = $1 WHERE id = $2", [filePath, id]);
+  return getDocument(userId, id);
 }
 
 /** Attach AI-extracted metadata (safe against junk model output). */
-function setMetadata(userId, id, { title, category, docDate, summary, tags, fullText }) {
+async function setMetadata(userId, id, { title, category, docDate, summary, tags, fullText }) {
   const CATS = new Set(["medical", "prescription", "receipt", "bill", "id", "ticket", "other"]);
-  stmts.setMeta.run({
-    id,
-    user_id: userId,
-    title: String(title || "").trim().slice(0, 160),
-    category: CATS.has(category) ? category : "other",
-    doc_date: /^\d{4}-\d{2}-\d{2}$/.test(String(docDate || "")) ? docDate : "",
-    summary: String(summary || "").trim().slice(0, 1200),
-    tags: (Array.isArray(tags) ? tags.join(", ") : String(tags || ""))
-      .toLowerCase()
-      .slice(0, 300),
-    // Complete transcription — makes "read it to me / what's the total /
-    // explain this" answerable from the REAL content. Capped for sanity;
-    // recall injects a smaller slice.
-    full_text: String(fullText || "").trim().slice(0, 12000),
-  });
-  return stmts.byId.get(id, userId);
+  await run(
+    `UPDATE documents SET title=$1, category=$2, doc_date=$3, summary=$4, tags=$5, full_text=$6
+     WHERE id=$7 AND user_id=$8`,
+    [
+      String(title || "").trim().slice(0, 160),
+      CATS.has(category) ? category : "other",
+      /^\d{4}-\d{2}-\d{2}$/.test(String(docDate || "")) ? docDate : "",
+      String(summary || "").trim().slice(0, 1200),
+      (Array.isArray(tags) ? tags.join(", ") : String(tags || "")).toLowerCase().slice(0, 300),
+      // Complete transcription — makes "read it to me / what's the total"
+      // answerable from the REAL content. Capped; recall injects a slice.
+      String(fullText || "").trim().slice(0, 12000),
+      id, userId,
+    ]
+  );
+  return getDocument(userId, id);
 }
 
-function setNote(userId, id, note) {
-  return (
-    stmts.setNote.run(String(note || "").trim().slice(0, 2000), id, userId)
-      .changes > 0
+async function setNote(userId, id, note) {
+  return (await run(
+    "UPDATE documents SET note = $1 WHERE id = $2 AND user_id = $3",
+    [String(note || "").trim().slice(0, 2000), id, userId]
+  )) > 0;
+}
+
+async function getDocument(userId, id) {
+  return one("SELECT * FROM documents WHERE id = $1 AND user_id = $2", [id, userId]);
+}
+
+async function listDocuments(userId, limit = 100) {
+  return query(
+    "SELECT * FROM documents WHERE user_id = $1 ORDER BY created_at DESC LIMIT $2",
+    [userId, Math.min(limit, 200)]
   );
 }
 
-function getDocument(userId, id) {
-  return stmts.byId.get(id, userId);
-}
-
-function listDocuments(userId, limit = 100) {
-  return stmts.list.all(userId, Math.min(limit, 200));
-}
-
-function deleteDocument(userId, id) {
-  const row = stmts.byId.get(id, userId);
+async function deleteDocument(userId, id) {
+  const row = await getDocument(userId, id);
   if (!row) return false;
-  stmts.del.run(id, userId);
+  await run("DELETE FROM documents WHERE id = $1 AND user_id = $2", [id, userId]);
   try { fs.unlinkSync(row.path); } catch (_) {}
   return true;
 }
@@ -218,7 +141,7 @@ const STOP = new Set(
  *  last-resort path fired: nothing matched the words, so these are simply
  *  the user's most recent documents (the caller must present them
  *  honestly, not as confirmed matches). */
-function searchDocuments(userId, message, limit = 3) {
+async function searchDocuments(userId, message, limit = 3) {
   const words = String(message || "")
     .toLowerCase()
     .replace(/[^\p{L}\p{N} ]/gu, " ")
@@ -226,24 +149,38 @@ function searchDocuments(userId, message, limit = 3) {
     .filter((w) => w.length >= 3 && !STOP.has(w));
   const uniq = [...new Set(words)].slice(0, 8);
 
+  const recentByCat = (a, b) =>
+    query(
+      `SELECT * FROM documents WHERE user_id = $1 AND category IN ($2, $3)
+       ORDER BY COALESCE(NULLIF(doc_date,''), '0') DESC, created_at DESC LIMIT $4`,
+      [userId, a, b, limit]
+    );
+
   let rows = [];
   if (uniq.length) {
-    const q = uniq.map((w) => `"${w}"`).join(" OR ");
-    try { rows = stmts.search.all(q, userId, limit); } catch (_) {}
+    // "blood | hospital | report" — OR-matched in the GIN index, ranked
+    // by ts_rank (the Postgres analogue of FTS5's BM25 rank).
+    const q = uniq.map((w) => w.replace(/[^\p{L}\p{N}]/gu, "")).filter(Boolean).join(" | ");
+    try {
+      rows = await query(
+        `SELECT *, ts_rank(fts, to_tsquery('simple', $1)) AS rank
+         FROM documents WHERE fts @@ to_tsquery('simple', $1) AND user_id = $2
+         ORDER BY rank DESC LIMIT $3`,
+        [q, userId, limit]
+      );
+    } catch (_) {}
   }
   if (rows.length === 0 && /\b(hospital|doctor|clinic|medical|prescri|report|test|lab|health)\w*/i.test(message)) {
-    rows = stmts.recentByCat.all(userId, "medical", "prescription", limit);
+    rows = await recentByCat("medical", "prescription");
   }
   if (rows.length === 0 && /\b(receipt|bill|invoice|paid|payment)\w*/i.test(message)) {
-    rows = stmts.recentByCat.all(userId, "receipt", "bill", limit);
+    rows = await recentByCat("receipt", "bill");
   }
   if (rows.length) return { hits: rows, exact: true };
 
-  // LAST RESORT: the user is clearly asking about a saved document (the
-  // caller's intent regex already fired) — showing their most recent
-  // saves beats a flat "nothing found" when keywords/categories miss
-  // (e.g. analysis hasn't run yet, or they used different words).
-  return { hits: listDocuments(userId).slice(0, limit), exact: false };
+  // LAST RESORT: the user is clearly asking about a saved document —
+  // showing their most recent saves beats a flat "nothing found".
+  return { hits: (await listDocuments(userId)).slice(0, limit), exact: false };
 }
 
 /** Human title when AI analysis hasn't landed (or failed): guess the kind
@@ -287,8 +224,8 @@ function toClient(d) {
 }
 
 /** How many documents a user has saved (plan-cap checks). */
-function countDocuments(userId) {
-  return stmts.count.get(String(userId)).n;
+async function countDocuments(userId) {
+  return (await one("SELECT COUNT(*)::int AS n FROM documents WHERE user_id = $1", [userId])).n;
 }
 
 module.exports = {

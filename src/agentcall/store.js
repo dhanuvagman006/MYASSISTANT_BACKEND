@@ -1,98 +1,41 @@
 /**
- * AGENT CALL STORE
- * ----------------
- * One row per outbound "AI talks on the phone" call:
- *   "call Allen and ask him what time he'll be home"
- * The row carries the task, the running transcript (agent + contact
- * turns), and the final result summary the app speaks back to the user.
+ * AGENT CALL STORE (Postgres)
+ * ---------------------------
+ * One row per outbound "AI talks on the phone" call. The row carries the
+ * task, the running transcript (agent + contact turns), and the final
+ * result summary the app speaks back to the user.
+ * Schema lives in src/db.js init().
  */
 const crypto = require("crypto");
-const { db } = require("../db");
-
-db.exec(`
-  CREATE TABLE IF NOT EXISTS agent_calls (
-    id           TEXT PRIMARY KEY,            -- opaque, unguessable
-    user_id      TEXT NOT NULL,
-    contact_name TEXT NOT NULL,
-    to_number    TEXT NOT NULL,               -- E.164
-    task         TEXT NOT NULL,               -- what to ask / tell
-    lang         TEXT NOT NULL DEFAULT 'en-IN',
-    state        TEXT NOT NULL DEFAULT 'queued',
-      -- queued | dialing | in_progress | completed | no_answer | failed
-    transcript   TEXT NOT NULL DEFAULT '[]',  -- JSON [{who:'agent'|'contact', text}]
-    result       TEXT,                        -- summary spoken back to the user
-    provider_call_id TEXT,          -- Plivo request/call UUID
-    created_at   INTEGER NOT NULL,
-    updated_at   INTEGER NOT NULL
-  );
-  CREATE INDEX IF NOT EXISTS idx_agent_calls_user
-    ON agent_calls (user_id, created_at DESC);
-`);
-
-// Dev-DB migration: earlier builds named the column twilio_sid.
-try {
-  const cols = db.prepare("PRAGMA table_info(agent_calls)").all().map((c) => c.name);
-  if (cols.includes("twilio_sid") && !cols.includes("provider_call_id")) {
-    db.exec("ALTER TABLE agent_calls RENAME COLUMN twilio_sid TO provider_call_id");
-  }
-} catch (_) {}
-
-const stmts = {
-  insert: db.prepare(`
-    INSERT INTO agent_calls
-      (id, user_id, contact_name, to_number, task, lang, state, created_at, updated_at)
-    VALUES (@id, @user_id, @contact_name, @to_number, @task, @lang, 'queued', @now, @now)
-  `),
-  byId: db.prepare("SELECT * FROM agent_calls WHERE id = ?"),
-  setState: db.prepare(
-    "UPDATE agent_calls SET state = ?, updated_at = ? WHERE id = ?"
-  ),
-  setProviderId: db.prepare(
-    "UPDATE agent_calls SET provider_call_id = ?, updated_at = ? WHERE id = ?"
-  ),
-  setTranscript: db.prepare(
-    "UPDATE agent_calls SET transcript = ?, updated_at = ? WHERE id = ?"
-  ),
-  setResult: db.prepare(
-    "UPDATE agent_calls SET result = ?, state = ?, updated_at = ? WHERE id = ?"
-  ),
-};
-
-db.exec(`
-  CREATE TABLE IF NOT EXISTS agent_call_settings (
-    user_id     TEXT PRIMARY KEY,
-    enabled     INTEGER NOT NULL DEFAULT 1,
-    daily_limit INTEGER NOT NULL DEFAULT 10,   -- calls per local day
-    hours_start INTEGER NOT NULL DEFAULT 8,    -- earliest local hour
-    hours_end   INTEGER NOT NULL DEFAULT 21    -- latest local hour (exclusive)
-  );
-`);
+const { one, run } = require("../db");
 
 const DEFAULT_SETTINGS = { enabled: 1, daily_limit: 10, hours_start: 8, hours_end: 21 };
 
 /** G2 — the user's calling rules (defaults until they change them). */
-function getSettings(userId) {
-  const row = db
-    .prepare("SELECT * FROM agent_call_settings WHERE user_id = ?")
-    .get(String(userId));
+async function getSettings(userId) {
+  const row = await one(
+    "SELECT * FROM agent_call_settings WHERE user_id = $1",
+    [String(userId)]
+  );
   return row || { user_id: String(userId), ...DEFAULT_SETTINGS };
 }
 
-function setSettings(userId, patch) {
-  const cur = getSettings(userId);
+async function setSettings(userId, patch) {
+  const cur = await getSettings(userId);
   const next = {
     enabled: patch.enabled === undefined ? cur.enabled : patch.enabled ? 1 : 0,
     daily_limit: clampInt(patch.daily_limit, 0, 50, cur.daily_limit),
     hours_start: clampInt(patch.hours_start, 0, 23, cur.hours_start),
     hours_end: clampInt(patch.hours_end, 1, 24, cur.hours_end),
   };
-  db.prepare(`
-    INSERT INTO agent_call_settings (user_id, enabled, daily_limit, hours_start, hours_end)
-    VALUES (@uid, @enabled, @daily_limit, @hours_start, @hours_end)
-    ON CONFLICT(user_id) DO UPDATE SET
-      enabled=@enabled, daily_limit=@daily_limit,
-      hours_start=@hours_start, hours_end=@hours_end
-  `).run({ uid: String(userId), ...next });
+  await run(
+    `INSERT INTO agent_call_settings (user_id, enabled, daily_limit, hours_start, hours_end)
+     VALUES ($1, $2, $3, $4, $5)
+     ON CONFLICT (user_id) DO UPDATE SET
+       enabled = EXCLUDED.enabled, daily_limit = EXCLUDED.daily_limit,
+       hours_start = EXCLUDED.hours_start, hours_end = EXCLUDED.hours_end`,
+    [String(userId), next.enabled, next.daily_limit, next.hours_start, next.hours_end]
+  );
   return getSettings(userId);
 }
 
@@ -103,32 +46,31 @@ function clampInt(v, min, max, dflt) {
 }
 
 /** Calls placed since the user's local midnight (tzOffset minutes east of UTC). */
-function countToday(userId, tzOffsetMin = 330) {
+async function countToday(userId, tzOffsetMin = 330) {
   const nowLocal = Date.now() + tzOffsetMin * 60_000;
   const midnightUtc = Math.floor(nowLocal / 864e5) * 864e5 - tzOffsetMin * 60_000;
-  return db
-    .prepare(
-      "SELECT COUNT(*) AS n FROM agent_calls WHERE user_id = ? AND created_at >= ? AND state != 'blocked'"
-    )
-    .get(String(userId), midnightUtc).n;
+  const row = await one(
+    `SELECT COUNT(*)::int AS n FROM agent_calls
+     WHERE user_id = $1 AND created_at >= $2 AND state != 'blocked'`,
+    [String(userId), midnightUtc]
+  );
+  return row.n;
 }
 
-function create({ userId, contactName, toNumber, task, lang }) {
+async function create({ userId, contactName, toNumber, task, lang }) {
   const id = crypto.randomBytes(16).toString("hex");
-  stmts.insert.run({
-    id,
-    user_id: String(userId),
-    contact_name: contactName,
-    to_number: toNumber,
-    task,
-    lang: lang || "en-IN",
-    now: Date.now(),
-  });
+  const now = Date.now();
+  await run(
+    `INSERT INTO agent_calls
+       (id, user_id, contact_name, to_number, task, lang, state, created_at, updated_at)
+     VALUES ($1, $2, $3, $4, $5, $6, 'queued', $7, $7)`,
+    [id, String(userId), contactName, toNumber, task, lang || "en-IN", now]
+  );
   return get(id);
 }
 
-function get(id) {
-  const row = stmts.byId.get(id);
+async function get(id) {
+  const row = await one("SELECT * FROM agent_calls WHERE id = $1", [id]);
   if (!row) return null;
   return { ...row, transcript: safeParse(row.transcript) };
 }
@@ -142,26 +84,37 @@ function safeParse(s) {
   }
 }
 
-function setState(id, state) {
-  stmts.setState.run(state, Date.now(), id);
+async function setState(id, state) {
+  await run("UPDATE agent_calls SET state = $1, updated_at = $2 WHERE id = $3", [
+    state, Date.now(), id,
+  ]);
 }
 
-function setProviderId(id, providerId) {
-  stmts.setProviderId.run(providerId, Date.now(), id);
+async function setProviderId(id, providerId) {
+  await run(
+    "UPDATE agent_calls SET provider_call_id = $1, updated_at = $2 WHERE id = $3",
+    [providerId, Date.now(), id]
+  );
 }
 
 /** Appends one turn and returns the updated transcript array. */
-function addTurn(id, who, text) {
-  const call = get(id);
+async function addTurn(id, who, text) {
+  const call = await get(id);
   if (!call) return [];
   const t = call.transcript;
   t.push({ who, text: String(text || "").slice(0, 1000) });
-  stmts.setTranscript.run(JSON.stringify(t), Date.now(), id);
+  await run(
+    "UPDATE agent_calls SET transcript = $1, updated_at = $2 WHERE id = $3",
+    [JSON.stringify(t), Date.now(), id]
+  );
   return t;
 }
 
-function setResult(id, result, state = "completed") {
-  stmts.setResult.run(result, state, Date.now(), id);
+async function setResult(id, result, state = "completed") {
+  await run(
+    "UPDATE agent_calls SET result = $1, state = $2, updated_at = $3 WHERE id = $4",
+    [result, state, Date.now(), id]
+  );
 }
 
 /** Terminal states — polling can stop. */

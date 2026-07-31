@@ -63,6 +63,7 @@ async function main() {
   const port = await require("./_free-port").freePort();
   process.env.PORT = String(port);
   BASE = `http://127.0.0.1:${port}`;
+  await require("./_reset-db").resetDb();
   require("../src/server");
   await sleep(500);
 
@@ -159,9 +160,9 @@ async function main() {
 
   // 8) Pooled minutes: member's call time draws down the OWNER's pool.
   const billingStore = require("../src/billing/store");
-  billingStore.bump(String(u2.id), "agent_min", 55); // member talked 55 min
-  const left1 = billingStore.remaining(String(u1.id), "agent_min").left;
-  const left2 = billingStore.remaining(String(u2.id), "agent_min").left;
+  await billingStore.bump(String(u2.id), "agent_min", 55); // member talked 55 min
+  const left1 = (await billingStore.remaining(String(u1.id), "agent_min")).left;
+  const left2 = (await billingStore.remaining(String(u2.id), "agent_min")).left;
   assert.strictEqual(left1, 5, "owner sees the pooled drawdown");
   assert.strictEqual(left2, 5, "member sees the same pool");
   console.log("✔ family agent minutes are pooled (60 − 55 = 5 for everyone)");

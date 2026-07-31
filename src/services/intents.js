@@ -199,7 +199,7 @@ async function buildToolContext({ userId, messages, tzOffsetMin = 330, lat, lng 
         return { block: "\n\n" + blocks.join("\n\n"), sources, documents };
       }
       if (userId && RE.foodOrder.test(msg)) {
-        if (!swiggyTokens.isLinked(userId)) {
+        if (!(await swiggyTokens.isLinked(userId))) {
           blocks.push(
             "TOOL RESULT — SWIGGY: the user asked to order food but has NOT " +
               "linked their Swiggy account. Tell them to open the You tab and " +
@@ -225,7 +225,7 @@ async function buildToolContext({ userId, messages, tzOffsetMin = 330, lat, lng 
       // ---- REMINDER: CREATE (deterministic side effect) ----
       if (userId && RE.remindSet.test(msg)) {
         const { text, dueAt } = parseReminder(msg, now, tzOffsetMin);
-        const r = reminders.create(userId, text, dueAt);
+        const r = await reminders.create(userId, text, dueAt);
         if (r) {
           blocks.push(
             "TOOL RESULT — a reminder WAS JUST CREATED for the user: " +
@@ -241,7 +241,7 @@ async function buildToolContext({ userId, messages, tzOffsetMin = 330, lat, lng 
       }
       // ---- REMINDER: LIST ----
       else if (userId && RE.remindList.test(msg)) {
-        const listing = reminders.upcomingText(userId);
+        const listing = await reminders.upcomingText(userId);
         blocks.push(
           "TOOL RESULT — the user's current reminders:\n" +
             (listing || "(none)") +
@@ -253,7 +253,7 @@ async function buildToolContext({ userId, messages, tzOffsetMin = 330, lat, lng 
       if (RE.weather.test(msg)) {
         const cityAsk = msg.match(RE.inCity)?.[1]?.trim();
         const cityMem = userId
-          ? memory.listMemories(userId).find((m) => m.key === "current_city")
+          ? (await memory.listMemories(userId)).find((m) => m.key === "current_city")
               ?.value?.replace(/^is currently in\s*/i, "")
           : null;
         const w = await weather.getWeather({
@@ -274,7 +274,7 @@ async function buildToolContext({ userId, messages, tzOffsetMin = 330, lat, lng 
 
       // ---- CALENDAR: CREATE BY VOICE (D3) — preview first, then confirm ----
       if (userId && RE.calCreate.test(msg) && !RE.remindSet.test(msg)) {
-        if (!gtokens.isConnected(userId)) {
+        if (!(await gtokens.isConnected(userId))) {
           blocks.push(
             "TOOL RESULT — CALENDAR: the user wants to create an event but Google " +
               "is NOT connected. Point them to Today tab → Inbox → Connect. Do not pretend."
@@ -302,7 +302,7 @@ async function buildToolContext({ userId, messages, tzOffsetMin = 330, lat, lng 
 
       // ---- GMAIL: DRAFT A REPLY (D2) — saves a Gmail draft, NEVER sends ----
       if (userId && RE.draftReply.test(msg)) {
-        if (!gtokens.isConnected(userId)) {
+        if (!(await gtokens.isConnected(userId))) {
           blocks.push(
             "TOOL RESULT — GMAIL: the user wants a reply drafted but Gmail is NOT connected. " +
               "Point them to Today tab → Inbox → Connect."
@@ -372,7 +372,7 @@ async function buildToolContext({ userId, messages, tzOffsetMin = 330, lat, lng 
 
       // ---- MEETING PREP (D4) ----
       if (userId && RE.meetingPrep.test(msg)) {
-        if (!gtokens.isConnected(userId)) {
+        if (!(await gtokens.isConnected(userId))) {
           blocks.push(
             "TOOL RESULT — the user asked to prepare for their meeting but Google is NOT connected. " +
               "Point them to Today tab → Inbox → Connect."
@@ -406,7 +406,7 @@ async function buildToolContext({ userId, messages, tzOffsetMin = 330, lat, lng 
 
       // ---- GMAIL ----
       if (userId && RE.email.test(msg)) {
-        if (!gtokens.isConnected(userId)) {
+        if (!(await gtokens.isConnected(userId))) {
           blocks.push(
             "TOOL RESULT — the user asked about email but has NOT connected " +
               "their Gmail. Tell them to open the Today tab → Inbox and tap " +
@@ -425,7 +425,7 @@ async function buildToolContext({ userId, messages, tzOffsetMin = 330, lat, lng 
 
       // ---- CALENDAR ----
       if (userId && RE.calendar.test(msg) && !RE.remindSet.test(msg)) {
-        if (!gtokens.isConnected(userId)) {
+        if (!(await gtokens.isConnected(userId))) {
           blocks.push(
             "TOOL RESULT — the user asked about their calendar but has NOT " +
               "connected Google Calendar. Tell them to connect it from the " +
@@ -445,7 +445,7 @@ async function buildToolContext({ userId, messages, tzOffsetMin = 330, lat, lng 
       // ---- SAVED DOCUMENTS RECALL ("show me the report from my last
       // hospital visit") — pure FTS lookup, zero extra AI/network calls. ----
       if (userId && RE.docRecall.test(msg)) {
-        const { hits, exact } = docsStore.searchDocuments(userId, msg, 3);
+        const { hits, exact } = await docsStore.searchDocuments(userId, msg, 3);
         if (hits.length) {
           for (const d of hits) documents.push(docsStore.toClient(d));
           const lines = hits.map((d, i) =>
@@ -530,9 +530,9 @@ async function buildToolContext({ userId, messages, tzOffsetMin = 330, lat, lng 
           }
         } catch (_) {}
         if (userId) {
-          const listing = reminders.upcomingText(userId);
+          const listing = await reminders.upcomingText(userId);
           parts.push("PENDING REMINDERS: " + (listing || "(none)"));
-          if (gtokens.isConnected(userId)) {
+          if (await gtokens.isConnected(userId)) {
             try {
               const ev = await gapi.upcomingEvents(userId, { days: 1 });
               const d = gapi.describeEvents(ev, tzOffsetMin);

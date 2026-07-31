@@ -7,16 +7,16 @@
  *
  * Design notes for scale:
  *   • Export streams straight from indexed per-user queries — no scans.
- *   • Deletion is ONE SQLite transaction (atomic even if the process dies);
+ *   • Deletion is ONE Postgres transaction (atomic even if the process dies);
  *     disk/file cleanup and remote revocation happen after commit and are
  *     retried-safe (idempotent).
- *   • Tables are looked up defensively via sqlite_master so a future table
+ *   • Tables are looked up defensively via information_schema so a future table
  *     without a user_id column can never crash the endpoint.
  */
 const express = require("express");
 const fs = require("fs");
 const path = require("path");
-const { db, findById } = require("../db");
+const { query, one, run, tx, findById } = require("../db");
 const gtokens = require("../google/tokens");
 
 const router = express.Router();
@@ -42,16 +42,13 @@ const USER_TABLES = [
   ["families", "owner_id"],
 ];
 
-const tableExists = db.prepare(
-  "SELECT 1 FROM sqlite_master WHERE type='table' AND name=?"
-);
-const hasColumn = (table, col) =>
-  db.prepare(`PRAGMA table_info(${table})`).all().some((c) => c.name === col);
-
-function existingUserTables() {
-  return USER_TABLES.filter(
-    ([t, c]) => tableExists.get(t) && hasColumn(t, c)
+async function existingUserTables() {
+  const rows = await query(
+    `SELECT table_name, column_name FROM information_schema.columns
+     WHERE table_schema = 'public'`
   );
+  const cols = new Set(rows.map((r) => r.table_name + "." + r.column_name));
+  return USER_TABLES.filter(([t, c]) => cols.has(t + "." + c));
 }
 
 // Never export secrets — the user owns their data, not our credentials.
@@ -67,25 +64,26 @@ function redactRow(row) {
 }
 
 // ---------- GET /privacy/export ----------
-router.get("/export", (req, res) => {
+router.get("/export", async (req, res) => {
   const uid = req.user.sub;
-  const user = findById(Number(uid)) || null;
+  const user = (await findById(Number(uid))) || null;
   const data = {
     exported_at: new Date().toISOString(),
     format: "myassistant-export-v1",
     account: user ? redactRow({ ...user }) : { id: uid },
     // service link status instead of raw tokens
     connections: {
-      google: !!gtokens.isConnected?.(uid),
+      google: !!(await gtokens.isConnected?.(uid)),
     },
   };
-  for (const [table, col] of existingUserTables()) {
+  for (const [table, col] of await existingUserTables()) {
     if (table === "google_tokens" || table === "swiggy_tokens") continue; // covered above
     try {
-      data[table] = db
-        .prepare(`SELECT * FROM ${table} WHERE ${col} = ?`)
-        .all(String(uid))
-        .map(redactRow);
+      // table/col come from OUR whitelist above (never user input) and were
+      // verified against information_schema — safe to interpolate.
+      data[table] = (
+        await query(`SELECT * FROM ${table} WHERE ${col} = $1`, [String(uid)])
+      ).map(redactRow);
     } catch (e) {
       data[table] = { error: "could not read: " + e.message };
     }
@@ -103,27 +101,22 @@ router.delete("/account", async (req, res) => {
 
   // 1) best-effort remote revocation FIRST (needs the tokens to still exist)
   try {
-    if (gtokens.isConnected?.(uid)) await gtokens.disconnect(uid);
+    if (await gtokens.isConnected?.(uid)) await gtokens.disconnect(uid);
   } catch (e) {
     console.warn("google revoke during account delete:", e.message);
   }
 
   // 2) all DB rows in one atomic transaction
+  // (No FTS shadow table anymore — the Postgres tsvector column lives on
+  //  the documents rows and dies with them.)
   try {
-    db.transaction(() => {
-      for (const [table, col] of existingUserTables()) {
-        db.prepare(`DELETE FROM ${table} WHERE ${col} = ?`).run(String(uid));
+    const tables = await existingUserTables();
+    await tx(async (client) => {
+      for (const [table, col] of tables) {
+        await client.query(`DELETE FROM ${table} WHERE ${col} = $1`, [String(uid)]);
       }
-      // FTS shadow table for documents, if present
-      if (tableExists.get("documents_fts")) {
-        try {
-          db.prepare(
-            "DELETE FROM documents_fts WHERE rowid NOT IN (SELECT rowid FROM documents)"
-          ).run();
-        } catch (_) {}
-      }
-      db.prepare("DELETE FROM users WHERE id = ?").run(Number(uid));
-    })();
+      await client.query("DELETE FROM users WHERE id = $1", [Number(uid)]);
+    });
   } catch (e) {
     console.error("account delete failed:", e.message);
     return res.status(500).json({ error: "deletion failed — try again" });

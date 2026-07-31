@@ -1,91 +1,264 @@
 /**
- * USER STORE — SQLite via better-sqlite3 (synchronous, zero-config).
- * The DB file lives in DATA_DIR (default ./data) — mount a volume there
- * in Docker so accounts survive redeploys.
+ * USER STORE + DB CORE — PostgreSQL via pg (async, pooled).
+ *
+ * Why Postgres (was better-sqlite3): SQLite allows exactly ONE writer
+ * process, which pinned the Deployment to a single replica. Postgres
+ * supports many concurrent writers → the k8s HPA can finally scale the
+ * backend horizontally.
+ *
+ * Env: DATABASE_URL, e.g. postgres://user:pass@host:5432/myassistant
+ *
+ * ALL table schemas live here in init() — one place to read the whole
+ * data model, and stores never race each other creating tables.
+ * server.js awaits init() before listening.
  */
-const Database = require("better-sqlite3");
-const fs = require("fs");
-const path = require("path");
+const { Pool } = require("pg");
 
-const dataDir = process.env.DATA_DIR || path.join(__dirname, "..", "data");
-fs.mkdirSync(dataDir, { recursive: true });
+if (!process.env.DATABASE_URL) {
+  console.error("FATAL: DATABASE_URL must be set (postgres://user:pass@host:5432/db)");
+  process.exit(1);
+}
 
-const db = new Database(path.join(dataDir, "myassistant.db"));
-db.pragma("journal_mode = WAL");
+const pool = new Pool({
+  connectionString: process.env.DATABASE_URL,
+  max: Number(process.env.PG_POOL_SIZE || 10),
+  idleTimeoutMillis: 30_000,
+});
 
-db.exec(`
-  CREATE TABLE IF NOT EXISTS users (
-    id            INTEGER PRIMARY KEY AUTOINCREMENT,
-    email         TEXT UNIQUE,
-    name          TEXT,
-    password_hash TEXT,
-    provider      TEXT NOT NULL DEFAULT 'email',  -- email | google | apple
-    provider_sub  TEXT,                            -- Google/Apple stable user id
-    created_at    INTEGER NOT NULL,
-    UNIQUE(provider, provider_sub)
+pool.on("error", (e) => console.error("pg pool error:", e.message));
+
+/** All rows. */
+async function query(text, params = []) {
+  return (await pool.query(text, params)).rows;
+}
+/** First row or null. */
+async function one(text, params = []) {
+  const r = await pool.query(text, params);
+  return r.rows[0] || null;
+}
+/** Row count of an INSERT/UPDATE/DELETE. */
+async function run(text, params = []) {
+  return (await pool.query(text, params)).rowCount;
+}
+/** Callback receives a client inside BEGIN…COMMIT (ROLLBACK on throw). */
+async function tx(fn) {
+  const client = await pool.connect();
+  try {
+    await client.query("BEGIN");
+    const out = await fn(client);
+    await client.query("COMMIT");
+    return out;
+  } catch (e) {
+    await client.query("ROLLBACK").catch(() => {});
+    throw e;
+  } finally {
+    client.release();
+  }
+}
+
+/** Create every table the app uses. Idempotent; runs once at boot. */
+async function init() {
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS users (
+      id            SERIAL PRIMARY KEY,
+      email         TEXT UNIQUE,
+      name          TEXT,
+      password_hash TEXT,
+      provider      TEXT NOT NULL DEFAULT 'email',  -- email | google | apple
+      provider_sub  TEXT,                            -- Google/Apple stable user id
+      created_at    BIGINT NOT NULL,
+      UNIQUE(provider, provider_sub)
+    );
+
+    CREATE TABLE IF NOT EXISTS reminders (
+      id         SERIAL PRIMARY KEY,
+      user_id    INTEGER NOT NULL,
+      text       TEXT NOT NULL,
+      due_at     BIGINT,             -- epoch ms; NULL = undated note-to-self
+      done       INTEGER NOT NULL DEFAULT 0,
+      created_at BIGINT NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS idx_reminders_user ON reminders(user_id, done, due_at);
+
+    CREATE TABLE IF NOT EXISTS google_tokens (
+      user_id       INTEGER PRIMARY KEY,
+      refresh_token TEXT NOT NULL,
+      access_token  TEXT,
+      expires_at    BIGINT,
+      scopes        TEXT,
+      updated_at    BIGINT NOT NULL
+    );
+
+    CREATE TABLE IF NOT EXISTS memories (
+      id         SERIAL PRIMARY KEY,
+      user_id    INTEGER NOT NULL,
+      category   TEXT NOT NULL DEFAULT 'fact',
+      key        TEXT NOT NULL,
+      value      TEXT NOT NULL,
+      source     TEXT NOT NULL DEFAULT 'ai',
+      created_at BIGINT NOT NULL,
+      updated_at BIGINT NOT NULL,
+      UNIQUE(user_id, key)
+    );
+    CREATE INDEX IF NOT EXISTS idx_memories_user ON memories(user_id);
+
+    CREATE TABLE IF NOT EXISTS agent_calls (
+      id               TEXT PRIMARY KEY,
+      user_id          TEXT NOT NULL,
+      contact_name     TEXT NOT NULL,
+      to_number        TEXT NOT NULL,
+      task             TEXT NOT NULL,
+      lang             TEXT NOT NULL DEFAULT 'en-IN',
+      state            TEXT NOT NULL DEFAULT 'queued',
+      transcript       TEXT NOT NULL DEFAULT '[]',
+      result           TEXT,
+      provider_call_id TEXT,
+      created_at       BIGINT NOT NULL,
+      updated_at       BIGINT NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS idx_agent_calls_user
+      ON agent_calls (user_id, created_at DESC);
+
+    CREATE TABLE IF NOT EXISTS agent_call_settings (
+      user_id     TEXT PRIMARY KEY,
+      enabled     INTEGER NOT NULL DEFAULT 1,
+      daily_limit INTEGER NOT NULL DEFAULT 10,
+      hours_start INTEGER NOT NULL DEFAULT 8,
+      hours_end   INTEGER NOT NULL DEFAULT 21
+    );
+
+    CREATE TABLE IF NOT EXISTS subscriptions (
+      user_id      TEXT PRIMARY KEY,
+      plan         TEXT NOT NULL,
+      period_end   BIGINT NOT NULL,
+      last_payment TEXT,
+      updated_at   BIGINT NOT NULL
+    );
+    CREATE TABLE IF NOT EXISTS usage (
+      user_id TEXT NOT NULL,
+      kind    TEXT NOT NULL,
+      period  TEXT NOT NULL,
+      count   INTEGER NOT NULL DEFAULT 0,
+      PRIMARY KEY (user_id, kind, period)
+    );
+    CREATE TABLE IF NOT EXISTS families (
+      id         SERIAL PRIMARY KEY,
+      owner_id   TEXT NOT NULL UNIQUE,
+      code       TEXT NOT NULL UNIQUE,
+      created_at BIGINT NOT NULL
+    );
+    CREATE TABLE IF NOT EXISTS family_members (
+      family_id  INTEGER NOT NULL,
+      user_id    TEXT NOT NULL UNIQUE,
+      joined_at  BIGINT NOT NULL,
+      PRIMARY KEY (family_id, user_id)
+    );
+    CREATE TABLE IF NOT EXISTS payments (
+      payment_id TEXT PRIMARY KEY,
+      user_id    TEXT NOT NULL,
+      plan       TEXT NOT NULL,
+      amount     INTEGER NOT NULL,
+      created_at BIGINT NOT NULL
+    );
+
+    CREATE TABLE IF NOT EXISTS swiggy_tokens (
+      user_id       INTEGER PRIMARY KEY,
+      refresh_token TEXT NOT NULL,
+      access_token  TEXT,
+      expires_at    BIGINT,
+      updated_at    BIGINT NOT NULL
+    );
+    CREATE TABLE IF NOT EXISTS kv (
+      k TEXT PRIMARY KEY,
+      v TEXT NOT NULL
+    );
+
+    CREATE TABLE IF NOT EXISTS documents (
+      id         SERIAL PRIMARY KEY,
+      user_id    INTEGER NOT NULL,
+      filename   TEXT NOT NULL,
+      mime       TEXT NOT NULL,
+      size       INTEGER NOT NULL,
+      path       TEXT NOT NULL,
+      title      TEXT NOT NULL DEFAULT '',
+      category   TEXT NOT NULL DEFAULT 'other',
+      doc_date   TEXT NOT NULL DEFAULT '',
+      summary    TEXT NOT NULL DEFAULT '',
+      note       TEXT NOT NULL DEFAULT '',
+      tags       TEXT NOT NULL DEFAULT '',
+      full_text  TEXT NOT NULL DEFAULT '',
+      created_at BIGINT NOT NULL,
+      -- Full-text search (was SQLite FTS5): auto-maintained tsvector over
+      -- the same five fields, GIN-indexed. 'simple' config = plain word
+      -- matching, closest to FTS5 unicode61 for mixed-language content.
+      fts tsvector GENERATED ALWAYS AS (
+        to_tsvector('simple',
+          coalesce(title,'') || ' ' || coalesce(summary,'') || ' ' ||
+          coalesce(note,'')  || ' ' || coalesce(tags,'')    || ' ' ||
+          coalesce(filename,'')
+        )
+      ) STORED
+    );
+    CREATE INDEX IF NOT EXISTS idx_docs_user ON documents(user_id, created_at DESC);
+    CREATE INDEX IF NOT EXISTS idx_docs_fts ON documents USING GIN (fts);
+  `);
+  // SERIAL ids come back from pg as integers; BIGINT columns come back as
+  // strings by default — parse them so Date-math keeps working.
+  const types = require("pg").types;
+  types.setTypeParser(20, (v) => (v === null ? null : Number(v))); // int8 → number
+}
+
+async function close() {
+  await pool.end();
+}
+
+// ---------------- users ----------------
+
+async function findByEmail(email) {
+  return one("SELECT * FROM users WHERE email = $1", [String(email).toLowerCase()]);
+}
+
+async function findById(id) {
+  return one("SELECT * FROM users WHERE id = $1", [Number(id)]);
+}
+
+async function findByProvider(provider, sub) {
+  return one("SELECT * FROM users WHERE provider = $1 AND provider_sub = $2", [provider, sub]);
+}
+
+async function createUser({ email, name, passwordHash = null, provider = "email", providerSub = null }) {
+  return one(
+    `INSERT INTO users (email, name, password_hash, provider, provider_sub, created_at)
+     VALUES ($1, $2, $3, $4, $5, $6) RETURNING *`,
+    [email ? email.toLowerCase() : null, name || null, passwordHash, provider, providerSub, Date.now()]
   );
-`);
-
-const stmts = {
-  byEmail: db.prepare("SELECT * FROM users WHERE email = ?"),
-  byId: db.prepare("SELECT * FROM users WHERE id = ?"),
-  byProviderSub: db.prepare(
-    "SELECT * FROM users WHERE provider = ? AND provider_sub = ?"
-  ),
-  insert: db.prepare(`
-    INSERT INTO users (email, name, password_hash, provider, provider_sub, created_at)
-    VALUES (@email, @name, @password_hash, @provider, @provider_sub, @created_at)
-  `),
-  updateName: db.prepare("UPDATE users SET name = ? WHERE id = ?"),
-};
-
-function findByEmail(email) {
-  return stmts.byEmail.get(email.toLowerCase());
-}
-
-function findById(id) {
-  return stmts.byId.get(id);
-}
-
-function findByProvider(provider, sub) {
-  return stmts.byProviderSub.get(provider, sub);
-}
-
-function createUser({ email, name, passwordHash = null, provider = "email", providerSub = null }) {
-  const info = stmts.insert.run({
-    email: email ? email.toLowerCase() : null,
-    name: name || null,
-    password_hash: passwordHash,
-    provider,
-    provider_sub: providerSub,
-    created_at: Date.now(),
-  });
-  return findById(info.lastInsertRowid);
 }
 
 /** Find-or-create for social sign-in. Links by provider sub first, then email.
  *  Returns { user, created } — `created` marks a brand-new account so the
  *  app can run the sign-up interview exactly once. */
-function upsertSocialUser({ provider, sub, email, name }) {
-  let user = findByProvider(provider, sub);
+async function upsertSocialUser({ provider, sub, email, name }) {
+  let user = await findByProvider(provider, sub);
   if (user) {
     if (name && !user.name) {
-      stmts.updateName.run(name, user.id);
-      user = findById(user.id);
+      await run("UPDATE users SET name = $1 WHERE id = $2", [name, user.id]);
+      user = await findById(user.id);
     }
     return { user, created: false };
   }
   // Same email already registered (e.g. email signup first, Google later):
   // link the social identity to that account rather than duplicating it.
   if (email) {
-    const existing = findByEmail(email);
+    const existing = await findByEmail(email);
     if (existing) {
-      db.prepare("UPDATE users SET provider_sub = COALESCE(provider_sub, ?) WHERE id = ?")
-        .run(sub, existing.id);
-      return { user: findById(existing.id), created: false };
+      await run(
+        "UPDATE users SET provider_sub = COALESCE(provider_sub, $1) WHERE id = $2",
+        [sub, existing.id]
+      );
+      return { user: await findById(existing.id), created: false };
     }
   }
-  return { user: createUser({ email, name, provider, providerSub: sub }), created: true };
+  return { user: await createUser({ email, name, provider, providerSub: sub }), created: true };
 }
 
 /** Shape sent to clients — never includes password_hash. */
@@ -93,4 +266,7 @@ function publicUser(u) {
   return { id: u.id, email: u.email, name: u.name, provider: u.provider };
 }
 
-module.exports = { db, findByEmail, findById, upsertSocialUser, createUser, publicUser };
+module.exports = {
+  pool, query, one, run, tx, init, close,
+  findByEmail, findById, upsertSocialUser, createUser, publicUser,
+};

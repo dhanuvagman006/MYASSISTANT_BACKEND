@@ -22,7 +22,7 @@ async function appAuth(req, res, next) {
     const authz = req.get("Authorization") || "";
     if (authz.startsWith("Bearer ")) {
       const { uid } = jwt.verify(authz.slice(7), process.env.JWT_SECRET);
-      const user = db.findById(uid);
+      const user = await db.findById(uid);
       if (!user) return res.status(401).json({ error: "account not found" });
       req.user = { sub: String(user.id), email: user.email, name: user.name };
       return next();

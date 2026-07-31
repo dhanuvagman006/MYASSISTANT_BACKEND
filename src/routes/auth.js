@@ -48,23 +48,23 @@ router.post("/signup", async (req, res) => {
   if (typeof password !== "string" || password.length < 8) {
     return res.status(400).json({ error: "password must be at least 8 characters" });
   }
-  if (db.findByEmail(email)) {
+  if (await db.findByEmail(email)) {
     return res.status(409).json({ error: "an account with this email already exists" });
   }
-  const user = db.createUser({
+  const user = await db.createUser({
     email,
     name: typeof name === "string" ? name.trim().slice(0, 100) : null,
     passwordHash: await bcrypt.hash(password, 10),
     provider: "email",
   });
   // First memories: whatever the user gave us at sign-up.
-  memory.seedProfile(user.id, { name: user.name, email: user.email });
+  await memory.seedProfile(user.id, { name: user.name, email: user.email });
   respond(res, user, true);
 });
 
 router.post("/login", async (req, res) => {
   const { email, password } = req.body || {};
-  const user = email ? db.findByEmail(email) : null;
+  const user = email ? await db.findByEmail(email) : null;
   // Same error for "no user" and "wrong password" — don't leak which emails exist.
   if (!user || !user.password_hash || !(await bcrypt.compare(password || "", user.password_hash))) {
     return res.status(401).json({ error: "incorrect email or password" });
@@ -83,7 +83,7 @@ router.post("/google", async (req, res) => {
       audience: process.env.GOOGLE_WEB_CLIENT_ID,
     });
     const p = ticket.getPayload();
-    const { user, created } = db.upsertSocialUser({
+    const { user, created } = await db.upsertSocialUser({
       provider: "google",
       sub: p.sub,
       email: p.email,
@@ -92,7 +92,7 @@ router.post("/google", async (req, res) => {
     // Seed memory from the Google profile: name, given name, email, photo,
     // locale. Runs on every Google sign-in (upsert), so a later profile
     // change on Google's side refreshes these too.
-    memory.seedProfile(user.id, {
+    await memory.seedProfile(user.id, {
       name: p.name,
       givenName: p.given_name,
       email: p.email,
@@ -114,7 +114,7 @@ router.post("/apple", async (req, res) => {
       issuer: "https://appleid.apple.com",
       audience: process.env.APPLE_BUNDLE_ID, // e.g. com.yourorg.myassistant
     });
-    const { user, created } = db.upsertSocialUser({
+    const { user, created } = await db.upsertSocialUser({
       provider: "apple",
       sub: payload.sub,
       email: payload.email || null,
@@ -122,7 +122,7 @@ router.post("/apple", async (req, res) => {
       // the app forwards it here so we don't lose it.
       name: typeof name === "string" ? name.trim().slice(0, 100) : null,
     });
-    memory.seedProfile(user.id, { name: user.name, email: user.email });
+    await memory.seedProfile(user.id, { name: user.name, email: user.email });
     respond(res, user, created);
   } catch {
     res.status(401).json({ error: "invalid Apple token" });
@@ -131,12 +131,12 @@ router.post("/apple", async (req, res) => {
 
 // ---------------- SESSION ----------------
 
-router.get("/me", (req, res) => {
+router.get("/me", async (req, res) => {
   const authz = req.get("Authorization") || "";
   if (!authz.startsWith("Bearer ")) return res.status(401).json({ error: "token required" });
   try {
     const { uid } = jwt.verify(authz.slice(7), JWT_SECRET);
-    const user = db.findById(uid);
+    const user = await db.findById(uid);
     if (!user) return res.status(401).json({ error: "account not found" });
     res.json({ user: db.publicUser(user) });
   } catch {

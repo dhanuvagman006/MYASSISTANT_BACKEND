@@ -34,6 +34,7 @@ async function main() {
   PORT = await require("./_free-port").freePort();
   BASE = `http://127.0.0.1:${PORT}`;
   const dataDir = fs.mkdtempSync(path.join(os.tmpdir(), "ma-smoke-"));
+  await require("./_reset-db").resetDb();
   const server = spawn(process.execPath, ["src/server.js"], {
     env: {
       ...process.env,

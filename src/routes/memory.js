@@ -22,11 +22,11 @@ function uid(req, res) {
   return id;
 }
 
-router.get("/", (req, res) => {
+router.get("/", async (req, res) => {
   const id = uid(req, res);
   if (id === null) return;
   res.json({
-    memories: store.listMemories(id).map((m) => ({
+    memories: (await store.listMemories(id)).map((m) => ({
       id: m.id,
       category: m.category,
       key: m.key,
@@ -37,11 +37,11 @@ router.get("/", (req, res) => {
   });
 });
 
-router.post("/", (req, res) => {
+router.post("/", async (req, res) => {
   const id = uid(req, res);
   if (id === null) return;
   const { key, value, category } = req.body || {};
-  const saved = store.remember(id, { key, value, category, source: "user" });
+  const saved = await store.remember(id, { key, value, category, source: "user" });
   if (!saved) return res.status(400).json({ error: "key and value required" });
   res.json({ ok: true, memory: { id: saved.id, key: saved.key, value: saved.value } });
 });
@@ -67,7 +67,7 @@ router.post("/interview", async (req, res) => {
     { force: true }
   );
   if (saved.length === 0) {
-    const fallback = store.remember(id, {
+    const fallback = await store.remember(id, {
       key: `interview_${store.slugKey(question).slice(0, 40) || "answer"}`,
       value: answer,
       category: "fact",
@@ -78,17 +78,17 @@ router.post("/interview", async (req, res) => {
   res.json({ ok: true, learned: saved.length });
 });
 
-router.delete("/:id", (req, res) => {
+router.delete("/:id", async (req, res) => {
   const id = uid(req, res);
   if (id === null) return;
-  const ok = store.deleteMemory(id, Number(req.params.id));
+  const ok = await store.deleteMemory(id, Number(req.params.id));
   res.status(ok ? 200 : 404).json(ok ? { ok: true } : { error: "not found" });
 });
 
-router.delete("/", (req, res) => {
+router.delete("/", async (req, res) => {
   const id = uid(req, res);
   if (id === null) return;
-  res.json({ ok: true, deleted: store.clearMemories(id) });
+  res.json({ ok: true, deleted: await store.clearMemories(id) });
 });
 
 module.exports = router;

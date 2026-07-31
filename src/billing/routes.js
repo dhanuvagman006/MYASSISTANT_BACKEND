@@ -30,12 +30,12 @@ const isDevUser = (sub) => !/^\d+$/.test(String(sub || ""));
 // ---------------- enforcement middleware ----------------
 
 function enforce(kind) {
-  return (req, res, next) => {
+  return async (req, res, next) => {
     const sub = req.user?.sub;
     if (isDevUser(sub)) return next();
     // Greeting rides on /chat but is one short call on app-open — free.
     if (kind === "chat" && req.path === "/greeting") return next();
-    const { left, limit, plan } = store.remaining(sub, kind);
+    const { left, limit, plan } = await store.remaining(sub, kind);
     if (left <= 0) {
       return res.status(402).json({
         error:
@@ -48,17 +48,17 @@ function enforce(kind) {
         plan,
       });
     }
-    store.bump(sub, kind, 1);
+    await store.bump(sub, kind, 1);
     next();
   };
 }
 
 /** Agent calls are gated on REMAINING MINUTES (pooled for families);
  *  actual consumption is metered from real call duration on hangup. */
-function enforceAgentCall(req, res, next) {
+async function enforceAgentCall(req, res, next) {
   const sub = req.user?.sub;
   if (isDevUser(sub)) return next();
-  const { left, plan } = store.remaining(sub, "agent_min");
+  const { left, plan } = await store.remaining(sub, "agent_min");
   if (left <= 0) {
     return res.status(402).json({
       error:
@@ -77,19 +77,19 @@ function enforceAgentCall(req, res, next) {
 function meterAgentSeconds(userId, seconds) {
   if (isDevUser(userId)) return;
   const mins = Math.max(1, Math.ceil((Number(seconds) || 0) / 60));
-  store.bump(userId, "agent_min", mins);
+  store.bump(userId, "agent_min", mins).catch((e) => console.error("meter:", e.message));
 }
 
 /** Plan-based document cap, enforced at upload time. */
 function enforceDocUpload(currentCount) {
-  return (req, res, next) => {
+  return async (req, res, next) => {
     const sub = req.user?.sub;
     if (isDevUser(sub)) return next();
-    const { plan } = store.effectivePlan(sub);
+    const { plan } = await store.effectivePlan(sub);
     const max = PLANS[plan].docsMax;
     let n = 0;
     try {
-      n = currentCount(sub);
+      n = await currentCount(sub);
     } catch (_) {}
     if (n >= max) {
       return res.status(402).json({
@@ -108,12 +108,12 @@ function enforceDocUpload(currentCount) {
 
 // ---------------- app-facing routes ----------------
 
-router.get("/", (req, res) => {
+router.get("/", async (req, res) => {
   const sub = req.user.sub;
-  const eff = store.effectivePlan(sub);
+  const eff = await store.effectivePlan(sub);
   const usage = {};
   for (const kind of ["chat", "stt", "vision", "agent_min"]) {
-    const r = store.remaining(sub, kind);
+    const r = await store.remaining(sub, kind);
     usage[kind] = { limit: r.limit, left: r.left === Infinity ? -1 : r.left };
   }
   res.json({
@@ -125,7 +125,7 @@ router.get("/", (req, res) => {
       family: PLANS.family.pricePaise,
     },
     usage,
-    family: store.familyInfo(sub),
+    family: await store.familyInfo(sub),
     paymentsConfigured: razorpay.configured(),
   });
 });
@@ -156,7 +156,7 @@ router.post("/checkout", async (req, res) => {
 
 // ---------------- Razorpay webhook ----------------
 
-router.post("/webhook", (req, res) => {
+router.post("/webhook", async (req, res) => {
   if (!razorpay.validWebhook(req)) {
     return res.status(403).json({ error: "bad signature" });
   }
@@ -168,7 +168,7 @@ router.post("/webhook", (req, res) => {
     const plan = String(notes.plan || "");
     const userId = String(notes.userId || "");
     if (isPaidPlan(plan) && /^\d+$/.test(userId)) {
-      store.activate({
+      await store.activate({
         userId,
         plan,
         paymentId: payment.id || entity.id,
@@ -184,27 +184,27 @@ router.post("/webhook", (req, res) => {
 
 // ---------------- families ----------------
 
-router.post("/family/invite", (req, res) => {
+router.post("/family/invite", async (req, res) => {
   const sub = req.user.sub;
-  const eff = store.effectivePlan(sub);
+  const eff = await store.effectivePlan(sub);
   if (!(eff.plan === "family" && eff.via === "own")) {
     return res.status(402).json({
       error: "the Family plan is needed to invite members",
       code: "limit_reached",
     });
   }
-  const fam = store.createOrGetFamily(sub);
+  const fam = await store.createOrGetFamily(sub);
   res.json({ code: fam.code, seats: PLANS.family.familySeats });
 });
 
-router.post("/family/join", (req, res) => {
-  const out = store.joinFamily(req.user.sub, req.body?.code || "");
+router.post("/family/join", async (req, res) => {
+  const out = await store.joinFamily(req.user.sub, req.body?.code || "");
   if (out.error) return res.status(400).json({ error: out.error });
   res.json({ ok: true, plan: "family" });
 });
 
-router.post("/family/leave", (req, res) => {
-  store.leaveFamily(req.user.sub);
+router.post("/family/leave", async (req, res) => {
+  await store.leaveFamily(req.user.sub);
   res.json({ ok: true });
 });
 
