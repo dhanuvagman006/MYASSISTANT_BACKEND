@@ -305,3 +305,42 @@ payment_link.paid), ADMIN_KEY.
   K1–K4 (advisory: partially covered by chat, but no Account Aggregator, no
   professional directory), L1–L3 (price tracking / assisted purchase / UPI),
   M1 (offline model). These are the Months 5–9 items in the scope doc.
+
+## Update — 3 Aug 2026: Prod config repair, Swiggy whitelist status, APK update channel
+- **ROOT CAUSE of broken Swiggy connect + webhooks**: the k8s Secret
+  `myassistant-secrets` was created with `--from-env-file=.env`, which does
+  NOT strip inline `#` comments — several values were corrupted (e.g.
+  `PUBLIC_BASE_URL` literally contained the comment text) and the Secret
+  silently overrode the correct ConfigMap. Fixed live via `kubectl patch`:
+  `PUBLIC_BASE_URL=https://api.hariassistant.tech`, stale ngrok
+  `SWIGGY_REDIRECT_URI` removed, `DEFAULT_COUNTRY_CODE`/`PLIVO_FROM_NUMBER`/
+  `APPLE_BUNDLE_ID` cleaned. ⚠ NEVER recreate the secret from a raw .env.
+- **Secrets rotated** (values were exposed in a support chat):
+  JWT_SECRET, ADMIN_KEY, APP_API_KEY, METRICS_TOKEN — done via patch.
+  STILL OWED BY OWNER: Gemini key, Groq key, Google web client secret,
+  GitHub PAT. `ALLOW_APP_KEY` left `true` pending an app-auth audit.
+- **Swiggy MCP**: redirect fix worked — error moved from "Ngrok-free isn't
+  whitelisted" to "**Hariassistant** isn't whitelisted": Swiggy now gates
+  production access behind Builders Club approval (apply at
+  mcp.swiggy.com/builders; localhost prototyping stays free). No code
+  change can bypass this; DCR code may need a fixed client_id once approved.
+- **Self-hosted app update channel** (`src/routes/appUpdate.js`):
+  `POST /admin/apk` (X-Admin-Key, multipart: apk + versionCode/versionName/
+  changelog[]) → stored in `DATA_DIR/apk/` on the PVC, sha256 computed,
+  previous build pruned; `GET /app/latest.apk` public download;
+  `GET /config` merges the uploaded build's version info + `apkUrl`/
+  `apkSha256`. Verified end-to-end with a local express harness.
+- **Deploy reality documented**: cluster runs `myassistant-backend:local`
+  (NOT the ghcr.io CI image). Ritual: `docker build -t myassistant-backend:local .`
+  → `docker save … | k3s ctr images import -` → `rollout restart`.
+  TODO: either add KUBE_CONFIG secret to enable the CI deploy job, or
+  switch the Deployment image to ghcr.io — one of the two, not the mix.
+
+## NEXT (planned for tomorrow, 4 Aug)
+- Rebuild + roll the backend image on the VPS (3-command ritual above) and
+  verify: `/app/latest.apk` → 404 `no build published` proves new code live.
+- Publish the first signed APK via `/admin/apk`; test full in-app OTA loop.
+- Check Traefik request-body limit for ~60 MB APK uploads (add ingress
+  annotation if the curl upload fails).
+- Draft + submit Swiggy Builders Club application.
+- Finish key rotation (Gemini/Groq/Google client secret/GitHub PAT).
