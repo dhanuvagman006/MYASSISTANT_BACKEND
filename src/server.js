@@ -75,6 +75,9 @@ app.get("/health", (_req, res) => res.json({ ok: true, ts: Date.now() }));
 // Public within the app: remote config (no secrets inside it)
 app.use("/config", configRoute);
 
+// Public APK download for the self-hosted update channel (sideload builds)
+app.use("/app", require("./routes/appUpdate").router);
+
 // Sign-up/sign-in — extra-tight limit to slow brute-force attempts
 app.use(
   "/auth",
