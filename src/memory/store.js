@@ -15,8 +15,26 @@
  * Schema lives in src/db.js init().
  */
 const { query, one, run } = require("../db");
+const { embedText, rankMemories, enabled: semanticEnabled } = require("./embeddings");
 
 const MAX_PER_USER = 200;
+
+/**
+ * Compute and persist the embedding for one saved row — FIRE AND FORGET.
+ * Failures leave embedding NULL; the row is still recalled (unranked) and
+ * gets another chance via the lazy backfill in buildMemoryPrompt.
+ */
+function embedRowAsync(row) {
+  if (!row || !semanticEnabled()) return;
+  const text = `${String(row.key).replace(/_/g, " ")}: ${row.value}`;
+  embedText(text, "RETRIEVAL_DOCUMENT")
+    .then((vec) =>
+      vec
+        ? run("UPDATE memories SET embedding = $1 WHERE id = $2", [JSON.stringify(vec), row.id])
+        : null
+    )
+    .catch(() => {});
+}
 const CATEGORIES = new Set(["profile", "preference", "fact", "context"]);
 
 /** 'Favorite food' / 'favorite-food' / ' Favorite  Food ' → 'favorite_food' */
@@ -59,16 +77,19 @@ async function remember(userId, { key, value, category = "fact", source = "ai" }
   }
 
   const now = Date.now();
-  return one(
+  const row = await one(
     `INSERT INTO memories (user_id, category, key, value, source, created_at, updated_at)
      VALUES ($1, $2, $3, $4, $5, $6, $6)
      ON CONFLICT (user_id, key) DO UPDATE SET
        value = EXCLUDED.value,
        category = EXCLUDED.category,
-       updated_at = EXCLUDED.updated_at
+       updated_at = EXCLUDED.updated_at,
+       embedding = NULL
      RETURNING *`,
     [userId, cat, k, v, source, now]
   );
+  embedRowAsync(row); // value may have changed → re-embed off the hot path
+  return row;
 }
 
 async function listMemories(userId) {
@@ -116,16 +137,42 @@ async function seedProfile(userId, { name, givenName, email, locale } = {}) {
  * Render memories as a system-prompt block the AI reads on every reply.
  * Kept compact: category-grouped one-liners, hard character budget.
  */
-async function buildMemoryPrompt(userId, { budget = 2200, excludeDocFacts = false } = {}) {
+async function buildMemoryPrompt(
+  userId,
+  { budget = 2200, excludeDocFacts = false, queryVec = null } = {}
+) {
   const rows = await listMemories(userId);
   if (rows.length === 0) return "";
 
-  const order = ["profile", "preference", "fact", "context"];
+  // Lazy backfill: rows saved before this feature (or whose embed call
+  // failed) get re-embedded in the background — never awaited here.
+  if (semanticEnabled()) {
+    rows.filter((r) => !r.embedding).slice(0, 10).forEach(embedRowAsync);
+  }
+
+  const usable = rows.filter((r) => !(excludeDocFacts && r.key.startsWith("doc_")));
   const lines = [];
-  for (const cat of order) {
-    for (const r of rows.filter((x) => x.category === cat)) {
-      if (excludeDocFacts && r.key.startsWith("doc_")) continue;
-      lines.push(`- (${cat}) ${r.key.replace(/_/g, " ")}: ${r.value}`);
+
+  // queryVec may be a promise (kicked off in parallel by the caller).
+  let qv = null;
+  try { qv = await queryVec; } catch { qv = null; }
+
+  if (qv) {
+    // SEMANTIC MODE — identity anchors always ride along, everything else
+    // is cosine-ranked against what the user just said, so the budget is
+    // spent on the facts most likely to matter for THIS reply.
+    const profile = usable.filter((r) => r.category === "profile");
+    const rest = rankMemories(usable.filter((r) => r.category !== "profile"), qv);
+    for (const r of [...profile, ...rest]) {
+      lines.push(`- (${r.category}) ${r.key.replace(/_/g, " ")}: ${r.value}`);
+    }
+  } else {
+    // FALLBACK — byte-identical to the pre-semantic behavior.
+    const order = ["profile", "preference", "fact", "context"];
+    for (const cat of order) {
+      for (const r of usable.filter((x) => x.category === cat)) {
+        lines.push(`- (${cat}) ${r.key.replace(/_/g, " ")}: ${r.value}`);
+      }
     }
   }
 

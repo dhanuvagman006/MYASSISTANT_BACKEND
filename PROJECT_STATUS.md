@@ -37,6 +37,23 @@ API server for the MYASSISTANT ("Hari") Flutter app. Endpoints:
      so the app pops the actual file up on screen during voice-to-voice.
    - Caps: 100 docs/user (oldest evicted, file deleted from disk too).
 
+7. **SEMANTIC MEMORY RECALL (Aug 2026)** — memories are now retrieved by MEANING,
+   not dumped in category order (see RESEARCH_AND_ROADMAP.md for the research
+   behind this):
+   - Every memory row gets a 768-dim `gemini-embedding-001` vector
+     (multilingual — Kannada/Hindi facts rank correctly), stored as JSON text
+     in a new `memories.embedding` column (auto-migrated; no pgvector needed).
+   - `/chat` and `/chat/stream` embed the user's utterance IN PARALLEL with the
+     intent tools, then `buildMemoryPrompt` cosine-ranks facts in Node so the
+     2200-char budget is spent on what's relevant to THIS question. Profile
+     facts (name, city) are always included; embeddings are written
+     fire-and-forget on save and lazily backfilled for old rows.
+   - Bulletproof fallback: no key / timeout / `MEMORY_SEMANTIC=off` → exact
+     pre-existing category-order behavior. Zero new dependencies.
+   - Tests: `scripts/memory-semantic-test.js` (pure unit, no DB/network, first
+     in `npm test`); ranking + fallback also verified end-to-end against live
+     Postgres during development.
+
 Last commit at time of writing: `3f51e39` on `main`.
 
 ## Environment (.env — never committed)

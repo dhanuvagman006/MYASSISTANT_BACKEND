@@ -101,6 +101,10 @@ async function init() {
       UNIQUE(user_id, key)
     );
     CREATE INDEX IF NOT EXISTS idx_memories_user ON memories(user_id);
+    -- Semantic recall (Aug 2026): 768-dim gemini-embedding-001 vector stored
+    -- as a JSON array string; NULL until backfilled. Cosine ranking happens
+    -- in Node (≤200 rows/user), so no pgvector extension is required.
+    ALTER TABLE memories ADD COLUMN IF NOT EXISTS embedding TEXT;
 
     CREATE TABLE IF NOT EXISTS agent_calls (
       id               TEXT PRIMARY KEY,

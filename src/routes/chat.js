@@ -45,6 +45,14 @@ router.post("/", async (req, res) => {
   try {
     // Personalization: everything Hari knows about THIS user rides along
     // as an addition to the system prompt on every single reply.
+    // SEMANTIC RECALL: embed what the user just said IN PARALLEL with the
+    // intent tools below — by the time we build the memory block the vector
+    // is (usually) ready, so relevance ranking costs ~zero extra latency.
+    const lastUserMsg = [...trimmed].reverse().find((m) => m.role === "user");
+    const queryVecP =
+      userId && lastUserMsg
+        ? require("../memory/embeddings").embedText(lastUserMsg.content, "RETRIEVAL_QUERY")
+        : Promise.resolve(null);
     // Tools: intents (reminders/weather/news/clock) run first — they may
     // EXECUTE actions and inject live data the AI must answer from.
     const toolCtx = await buildToolContext({
@@ -60,6 +68,7 @@ router.post("/", async (req, res) => {
       (userId
         ? await buildMemoryPrompt(userId, {
             excludeDocFacts: (toolCtx.documents || []).length > 0,
+            queryVec: queryVecP,
           })
         : "") +
       toolCtx.block +
@@ -112,6 +121,12 @@ router.post("/stream", async (req, res) => {
   const send = (obj) => res.write(JSON.stringify(obj) + "\n");
 
   try {
+    // Semantic recall vector — computed in parallel with the tools (see /chat).
+    const lastUserMsg = [...trimmed].reverse().find((m) => m.role === "user");
+    const queryVecP =
+      userId && lastUserMsg
+        ? require("../memory/embeddings").embedText(lastUserMsg.content, "RETRIEVAL_QUERY")
+        : Promise.resolve(null);
     const ctx = await buildToolContext({
       userId,
       messages: trimmed,
@@ -122,7 +137,9 @@ router.post("/stream", async (req, res) => {
     sources = ctx.sources;
     documents = ctx.documents || [];
     const extraSystem =
-      (userId ? await buildMemoryPrompt(userId) : "") + ctx.block + styleDirective(req);
+      (userId ? await buildMemoryPrompt(userId, { queryVec: queryVecP }) : "") +
+      ctx.block +
+      styleDirective(req);
 
     try {
       for await (const d of generateReplyStream(trimmed, { extraSystem })) {
