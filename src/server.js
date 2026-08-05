@@ -189,6 +189,21 @@ app.use("/places", appAuth, require("./routes/places"));
 // Regional language from the caller's IP (no app permissions needed)
 app.use("/region", regionRoute);
 
+// D-ID FACE MODE + VIDEO BRIEFINGS (docs.d-id.com):
+//  - /did/llm/*  — called BY D-ID's servers (custom-LLM contract); it
+//                  authenticates itself with x-api-key = DID_LLM_KEY, so
+//                  no app JWT here.
+//  - /did/face   — loaded by the app's WebView via a signed query token
+//                  minted by POST /did/session; a browser page can't
+//                  attach our Authorization header, the token IS the auth.
+//  - everything else under /did requires the normal app JWT.
+app.use("/did/llm", require("./did/compat"));
+app.use(
+  "/did",
+  (req, res, next) => (req.path === "/face" ? next() : appAuth(req, res, next)),
+  require("./did/routes")
+);
+
 // JSON 404 for unmatched routes (instead of Express's default HTML page)
 app.use((_req, res) => res.status(404).json({ error: "not found" }));
 

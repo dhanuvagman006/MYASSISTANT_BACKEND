@@ -19,11 +19,14 @@ module.exports = {
     "First internal build — chat with live AI",
   ],
 
-  announcement: null, // e.g. "New: Malayalam voice replies are live! 🎉"
+  announcement: "New: meet Hari face to face — tap the video icon on the Assistant tab ✨",
 
   features: {
     voice_mode: false,        // A2 — flip when voice ships
     morning_briefing: false,  // C2
+    face_mode: true,          // D-ID streaming avatar ("Face Mode", Pro)
+    face_interview: true,     // first-meeting interview conducted by the face
+    video_briefing: true,     // D-ID daily video briefing on the Today screen
     photo_questions: false,   // B1
     live_info_cards: false,   // A5 structured answer cards
     agent_calls: true,        // "call X and ask Y" — AI talks on the call

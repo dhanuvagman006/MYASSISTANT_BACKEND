@@ -344,3 +344,25 @@ payment_link.paid), ADMIN_KEY.
   annotation if the curl upload fails).
 - Draft + submit Swiggy Builders Club application.
 - Finish key rotation (Gemini/Groq/Google client secret/GitHub PAT).
+
+7. **D-ID FACE MODE + VIDEO BRIEFINGS** (5 Aug 2026) — new `src/did/` module:
+   - `POST /did/llm/v1/chat/completions` — OpenAI-compatible streaming bridge
+     (per docs.d-id.com/docs/custom-llms). D-ID's avatar agents are created with
+     `llm.type=custom` pointing here, so the FACE speaks with Hari's real brain
+     (memory, docs, tools, regional language). Auth: `x-api-key = DID_LLM_KEY`
+     + per-user signed `x-hari-user` header baked in at agent creation.
+   - `POST /did/session` → per-user D-ID agent (lazy-created, stored in
+     `did_agents`) + client key + signed page token → `{faceUrl}`.
+   - `GET /did/face?t=…` — server-HOSTED face page (D-ID Agents Embed, brand
+     styled) loaded by the app's WebView; restylable with a redeploy.
+   - `GET|POST /did/briefing` — one avatar video per user per day (`did_briefings`):
+     weather + reminders + headlines → one AI call writes a 60–90 word script →
+     D-ID `/talks` renders it; app polls to `done` then plays `result_url`.
+   - GATING: Face Mode + briefings are PRO (`effectivePlan`); the sign-up
+     interview face session is free for everyone (one bounded wow moment).
+   - Env: `DID_API_KEY`, `DID_LLM_KEY` (+ optional `DID_PRESENTER_SOURCE_URL`
+     for a custom brand face, `DID_VOICE_ID`). Feature is invisible while unset.
+   - ⚠️ Deploy notes: PUBLIC_BASE_URL must be a public HTTPS URL (D-ID calls
+     back into /did/llm). Verify the embed script tag attributes against
+     docs.d-id.com/docs/embed-quickstart on first run — D-ID versions the
+     embed (`agent.d-id.com/v2/index.js`) and attribute names occasionally move.
