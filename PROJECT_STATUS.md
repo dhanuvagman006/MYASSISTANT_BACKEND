@@ -12,10 +12,11 @@ API server for the MYASSISTANT ("Hari") Flutter app. Endpoints:
 ## Done so far
 1. **Dockerised** — `Dockerfile` (node:20-alpine, non-root, healthcheck), `docker-compose.yml`
    (`cp .env.example .env` → `docker compose up --build`), `.dockerignore`.
-2. **Provider switch** — Anthropic removed at user's request; **Gemini only**
-   (`GEMINI_API_KEY`, default model `gemini-2.0-flash`) in `src/services/ai/router.js`.
-   ⚠️ The client contract (Section 5) requires TWO AI providers (primary + fallback) —
-   a second provider must be re-added before delivery.
+2. **Provider chain** — `src/services/ai/router.js` now runs a two-provider
+   chain (Groq Llama 3.3 70B first for latency, Gemini 2.0 Flash fallback;
+   order via `AI_PROVIDER_ORDER`). The Section-5 two-provider contract item
+   is SATISFIED. (This entry previously said "Gemini only" and went stale —
+   corrected 07 Aug 2026.)
 3. Verified locally: server boots, `/health` and `/config` respond correctly.
 4. **GET /region** — regional language from the caller's IP (ip-api.com free tier, 10-min
    cache, private/LAN IPs fall back to the server's public IP). Indian state -> locale map
