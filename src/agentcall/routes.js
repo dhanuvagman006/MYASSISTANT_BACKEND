@@ -22,6 +22,7 @@
 const express = require("express");
 const store = require("./store");
 const plivo = require("./plivo");
+const audit = require("../audit/log");
 const engine = require("./engine");
 const { findById } = require("../db");
 const { meterAgentSeconds } = require("../billing/routes");
@@ -134,6 +135,7 @@ router.post("/", async (req, res) => {
     const uuid = await plivo.createCall({ to, callId: call.id });
     await store.setProviderId(call.id, uuid);
     await store.setState(call.id, "dialing");
+    audit.record(req.user.sub, "call.placed", `to ${name} — ${what.slice(0, 120)}`);
     res.status(202).json({ id: call.id, state: "dialing" });
   } catch (e) {
     console.error("agent-call create failed:", e.message);

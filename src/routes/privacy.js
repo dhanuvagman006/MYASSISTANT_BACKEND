@@ -29,6 +29,7 @@ const filesRoot = path.join(
 /** tables that key rows by a user column → [table, column] */
 const USER_TABLES = [
   ["memories", "user_id"],
+  ["actions_log", "user_id"],
   ["reminders", "user_id"],
   ["documents", "user_id"],
   ["google_tokens", "user_id"],

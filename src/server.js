@@ -111,6 +111,9 @@ app.use("/chat", appAuth, perUserLimit, billing.enforce("chat"), chatRoute);
 // Per-user memory management (list / add / forget) for the privacy screen.
 app.use("/memory", appAuth, require("./routes/memory"));
 
+// Phase 1 / ADR-004 — the user-visible audit trail of assistant actions.
+app.use("/actions", appAuth, require("./routes/actions"));
+
 // Privacy dashboard (F2): full data export + permanent account deletion.
 app.use("/privacy", appAuth, require("./routes/privacy"));
 

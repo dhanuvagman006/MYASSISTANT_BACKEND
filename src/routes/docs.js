@@ -19,6 +19,7 @@ const docs = require("../docs/store");
 const { analyzeDocument } = require("../docs/analyze");
 const memory = require("../memory/store");
 const billing = require("../billing/routes");
+const audit = require("../audit/log");
 
 const upload = multer({
   storage: multer.memoryStorage(),
@@ -87,6 +88,7 @@ router.post(
   // Analysis (title/summary/tags + the memory fact) completes in the
   // background and shows up on the next GET /docs.
   res.json({ ok: true, document: docs.toClient(row), analyzed: false });
+  audit.record(id, "document.saved", f.originalname || `document #${row.id}`);
 
   healAttempted.add(row.id);
   await analyzeInBackground(id, row, f.buffer, f.mimetype);
@@ -134,7 +136,10 @@ router.delete("/:id", async (req, res) => {
   if (id === null) return;
   const docId = Number(req.params.id);
   const ok = await docs.deleteDocument(id, docId);
-  if (ok) await memory.deleteByKey?.(id, `doc_${docId}`);
+  if (ok) {
+    await memory.deleteByKey?.(id, `doc_${docId}`);
+    audit.record(id, "document.deleted", `document #${docId} and its memory fact`);
+  }
   res.status(ok ? 200 : 404).json(ok ? { ok: true } : { error: "not found" });
 });
 

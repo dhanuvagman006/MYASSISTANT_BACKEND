@@ -9,6 +9,7 @@
 const router = require("express").Router();
 const tokens = require("./tokens");
 const gapi = require("./api");
+const audit = require("../audit/log");
 
 function uid(req, res) {
   const id = Number(req.user?.sub);
@@ -116,6 +117,7 @@ router.post("/event", async (req, res) => {
       location, description,
     });
     if (ev === null) return res.status(409).json({ error: "not linked" });
+    audit.record(id, "calendar.event.created", `${title} — ${new Date(start).toISOString()}`);
     res.status(201).json({ event: ev });
   } catch (e) {
     const scope = /scope/.test(e.message);
@@ -151,6 +153,7 @@ router.post("/draft", async (req, res) => {
     }
     const draft = await gapi.createDraft(id, payload);
     if (draft === null) return res.status(409).json({ error: "not linked" });
+    audit.record(id, "email.draft.created", `to ${payload.to} — ${payload.subject}`);
     res.status(201).json({ draft });
   } catch (e) {
     const scope = /scope/.test(e.message);

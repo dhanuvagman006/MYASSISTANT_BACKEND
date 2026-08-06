@@ -7,6 +7,7 @@
  */
 const router = require("express").Router();
 const store = require("./store");
+const audit = require("../audit/log");
 
 function uid(req, res) {
   const id = Number(req.user?.sub);
@@ -37,6 +38,7 @@ router.post("/", async (req, res) => {
   const { text, dueAt } = req.body || {};
   const r = await store.create(id, text, Number.isFinite(dueAt) ? dueAt : null);
   if (!r) return res.status(400).json({ error: "text required" });
+  audit.record(id, "reminder.created", r.text);
   res.json({ reminder: shape(r) });
 });
 
@@ -59,6 +61,7 @@ router.delete("/:id", async (req, res) => {
   const id = uid(req, res);
   if (id === null) return;
   const ok = await store.remove(id, Number(req.params.id));
+  if (ok) audit.record(id, "reminder.deleted", `reminder #${req.params.id}`);
   res.status(ok ? 200 : 404).json(ok ? { ok: true } : { error: "not found" });
 });
 
