@@ -77,6 +77,28 @@ router.get("/calendar", async (req, res) => {
 
 // ---------- WRITE endpoints (D2 · D3 · D4) ----------
 
+/** FOCUS GUARD — analyse the coming week for overload; returns proposed
+ *  30-min buffers + reschedule candidates. READ-ONLY: applying a buffer
+ *  is the app calling the existing POST /google/event after the user
+ *  approves the preview (same rule as D3 — the server never self-inserts). */
+router.get("/focus-plan", async (req, res) => {
+  const id = uid(req, res);
+  if (id === null) return;
+  try {
+    const events = await gapi.upcomingEvents(id, {
+      days: Math.min(Number(req.query.days) || 7, 31),
+      max: 100,
+    });
+    if (events === null) return res.status(409).json({ error: "not linked" });
+    const plan = require("./focus").analyzeLoad(events, {
+      tzOffsetMin: Number(req.query.tzOffsetMin) || 0,
+    });
+    res.json(plan);
+  } catch (e) {
+    res.status(502).json({ error: "calendar unavailable" });
+  }
+});
+
 /** D3 — create a calendar event (the app shows a preview and the user
  *  approves BEFORE calling this; voice creation confirms by speech). */
 router.post("/event", async (req, res) => {

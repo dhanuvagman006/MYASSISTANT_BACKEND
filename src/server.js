@@ -117,6 +117,9 @@ app.use("/privacy", appAuth, require("./routes/privacy"));
 // Google account link: Gmail + Calendar (read-only).
 app.use("/google", appAuth, require("./google/routes"));
 
+// MEETING COPILOT — transcript → decisions / actions / follow-up draft
+app.use("/meetings", appAuth, require("./meetings/routes"));
+
 // Swiggy account link (Builders Club MCP food ordering).
 // The OAuth callback is reached by a BROWSER redirect (no app JWT), so it
 // is mounted before the auth guard; identity rides on the signed state.
