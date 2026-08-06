@@ -70,6 +70,20 @@ async function init() {
       UNIQUE(provider, provider_sub)
     );
 
+    -- AUDIT LOG (Phase 1 / ADR-004): one row for every action the assistant
+    -- performs on the user's behalf that touches the outside world or
+    -- destroys data. The privacy dashboard reads it; /privacy/export includes
+    -- it; account erasure removes it (it is the user's data). Append-only by
+    -- convention — no UPDATE/DELETE path exists in application code.
+    CREATE TABLE IF NOT EXISTS actions_log (
+      id         BIGSERIAL PRIMARY KEY,
+      user_id    INTEGER NOT NULL,
+      action     TEXT NOT NULL,          -- e.g. 'reminder.created', 'food.order.placed'
+      detail     TEXT,                   -- short human-readable summary, no secrets
+      created_at BIGINT NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS idx_actions_user ON actions_log(user_id, id DESC);
+
     CREATE TABLE IF NOT EXISTS reminders (
       id         SERIAL PRIMARY KEY,
       user_id    INTEGER NOT NULL,

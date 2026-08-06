@@ -59,6 +59,8 @@ const rupees = (v) => {
  * Build the cart for a craving. Returns { ok, say } where `say` is the
  * exact situation for the AI to voice. Never places the order.
  */
+const audit = require("../audit/log");
+
 async function prepareOrder(userId, craving) {
   pendingConfirm.delete(userId); // new craving supersedes any old one
 
@@ -153,6 +155,7 @@ async function confirmPending(userId) {
     const placed = firstArray(recent?.data || recent || {}, ["orders", "data"])
       .find((o) => Date.now() - new Date(o.createdAt || o.orderTime || 0).getTime() < 300_000);
     if (placed) {
+      audit.record(userId, "food.order.placed", `${p.itemName} from ${p.restaurantName}, Rs ${p.total}, COD (verified after retry)`);
       return { ok: true, say: `The order DID go through: ${p.itemName} from ${p.restaurantName}, rupees ${p.total}, cash on delivery. Confirm it cheerfully.` };
     }
     console.error("swiggy place_food_order failed:", e.message);
@@ -167,6 +170,7 @@ async function confirmPending(userId) {
     const mins = t?.data?.etaMinutes || t?.data?.eta || null;
     if (mins) eta = ` Estimated delivery in about ${mins} minutes.`;
   }
+  audit.record(userId, "food.order.placed", `${p.itemName} from ${p.restaurantName}, Rs ${p.total}, COD`);
   return {
     ok: true,
     say: `ORDER PLACED: ${p.itemName} from ${p.restaurantName}, rupees ${p.total}, cash on delivery.${eta} Tell the user warmly.`,
