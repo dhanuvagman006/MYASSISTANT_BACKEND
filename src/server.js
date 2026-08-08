@@ -179,6 +179,25 @@ app.get("/tools/news", appAuth, async (req, res) => {
   }
 });
 
+// ASSISTANT — the interactive voice-assistant experience: one SSE stream
+// per app session carries live states (listening → thinking → searching →
+// dialing…), transcripts, search cards, contact/call events. The stream
+// (/stream/:id) and generated audio (/audio/:id) are reached WITHOUT the
+// app JWT — EventSource can't send headers and Plivo fetches the audio —
+// each is protected by its own signed/unguessable token inside the route.
+app.use(
+  "/assistant",
+  (req, res, next) =>
+    req.path.startsWith("/stream/") || req.path.startsWith("/audio/")
+      ? next()
+      : appAuth(req, res, next),
+  (req, res, next) =>
+    req.path.startsWith("/stream/") || req.path.startsWith("/audio/")
+      ? next()
+      : perUserLimit(req, res, next),
+  require("./assistant/routes")
+);
+
 // Voice transcription (Whisper via Groq) — same auth as chat
 app.use("/stt", appAuth, perUserLimit, billing.enforce("stt"), sttRoute);
 

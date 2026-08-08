@@ -187,6 +187,20 @@ router.post("/plivo/:id/answer", async (req, res) => {
   if (!call) return;
 
   await store.setState(call.id, "in_progress");
+
+  // /assistant call-and-inform: the opening was pre-rendered as audio in
+  // the user's enrolled (cloned) voice — <Play> it instead of carrier TTS.
+  if (call.opening_audio_url) {
+    await store.addTurn(call.id, "agent", "[played user's voice message]");
+    return res.type("text/xml").send(
+      plivo.xmlPlayGetInput({
+        audioUrl: call.opening_audio_url,
+        actionUrl: inputUrl(call.id),
+        lang: call.lang,
+      })
+    );
+  }
+
   const user = /^\d+$/.test(String(call.user_id))
     ? await findById(Number(call.user_id))
     : null;

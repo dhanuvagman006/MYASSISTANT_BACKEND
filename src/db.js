@@ -137,6 +137,11 @@ async function init() {
     CREATE INDEX IF NOT EXISTS idx_agent_calls_user
       ON agent_calls (user_id, created_at DESC);
 
+    -- /assistant call-and-inform: when the opening message was rendered
+    -- with the user's enrolled/cloned voice (ElevenLabs), this holds the
+    -- public mp3 URL that Plivo <Play>s instead of carrier TTS.
+    ALTER TABLE agent_calls ADD COLUMN IF NOT EXISTS opening_audio_url TEXT;
+
     CREATE TABLE IF NOT EXISTS agent_call_settings (
       user_id     TEXT PRIMARY KEY,
       enabled     INTEGER NOT NULL DEFAULT 1,

@@ -167,6 +167,24 @@ function xmlSpeakGetInput({ text, actionUrl, lang }) {
   );
 }
 
+/** PLAY a pre-generated audio file (cloned/ElevenLabs voice) while
+ *  listening for the contact's reply — same shape as xmlSpeakGetInput,
+ *  with <Play> instead of <Speak>. Used by /assistant call-and-inform
+ *  when the opening message was rendered in the user's enrolled voice. */
+function xmlPlayGetInput({ audioUrl, actionUrl, lang }) {
+  const v = voiceFor(lang);
+  return (
+    `<?xml version="1.0" encoding="UTF-8"?><Response>` +
+    `<GetInput action="${esc(actionUrl)}" method="POST" inputType="speech" ` +
+    `language="${esc(v.language)}" speechEndTimeout="3" executionTimeout="20" ` +
+    `redirect="true" profanityFilter="false">` +
+    `<Play>${esc(audioUrl)}</Play>` +
+    `</GetInput>` +
+    `<Redirect method="POST">${esc(actionUrl)}</Redirect>` +
+    `</Response>`
+  );
+}
+
 /** Speak [text] and hang up. */
 function xmlSpeakHangup({ text, lang }) {
   const v = voiceFor(lang);
@@ -183,5 +201,6 @@ module.exports = {
   hangup,
   validSignature,
   xmlSpeakGetInput,
+  xmlPlayGetInput,
   xmlSpeakHangup,
 };
