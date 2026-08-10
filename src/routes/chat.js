@@ -98,7 +98,7 @@ router.post("/", async (req, res) => {
  * Lines: {"d":"delta"}… then {"done":true,"sources":[…],"provider":…}.
  * The app speaks each sentence the moment it completes, so the user
  * hears the start of the answer while the rest is still generating.
- * Falls back to the full non-streaming chain if Groq can't stream.
+ * Falls back to non-streaming Gemini if streaming can’t start.
  */
 router.post("/stream", async (req, res) => {
   const { messages } = req.body || {};
@@ -146,13 +146,13 @@ router.post("/stream", async (req, res) => {
         full += d;
         send({ d });
       }
-      send({ done: true, sources, documents, provider: "groq" });
+      send({ done: true, sources, documents, provider: "gemini" });
     } catch (e) {
       if (full) {
         // Stream broke mid-answer: end cleanly with what was sent.
-        send({ done: true, sources, documents, provider: "groq" });
+        send({ done: true, sources, documents, provider: "gemini" });
       } else {
-        // Groq couldn't start: full provider chain, sent as one delta.
+        // Streaming couldn’t start: non-streaming Gemini, sent as one delta.
         const { reply, provider } = await generateReply(trimmed, { extraSystem });
         full = reply || "";
         send({ d: full });

@@ -112,7 +112,7 @@ router.post("/:id/message", (req, res) => {
     .catch((e) => console.error("assistant message error:", e));
 });
 
-// ---------------- STT: Deepgram Nova-2 -> Groq Whisper fallback ----------------
+// ---------------- STT: Deepgram Nova-2 (optional) -> Gemini fallback ----------------
 
 async function deepgramTranscribe(file) {
   const key = process.env.DEEPGRAM_API_KEY;
@@ -140,26 +140,11 @@ async function deepgramTranscribe(file) {
   };
 }
 
-async function groqTranscribe(file) {
-  const key = process.env.GROQ_API_KEY;
-  if (!key) return null;
-  const fd = new FormData();
-  fd.append(
-    "file",
-    new Blob([file.buffer], { type: file.mimetype || "audio/m4a" }),
-    file.originalname || "audio.m4a"
-  );
-  fd.append("model", "whisper-large-v3");
-  fd.append("response_format", "json");
-  const r = await fetch("https://api.groq.com/openai/v1/audio/transcriptions", {
-    method: "POST",
-    headers: { authorization: `Bearer ${key}` },
-    signal: AbortSignal.timeout(30_000),
-    body: fd,
-  });
-  if (!r.ok) throw new Error(`groq stt ${r.status}`);
-  const data = await r.json();
-  return { text: String(data.text || "").trim(), language: "auto", provider: "groq" };
+async function geminiTranscribe(file) {
+  if (!process.env.GEMINI_API_KEY) return null;
+  const { transcribeAudio } = require("../services/ai/router");
+  const out = await transcribeAudio(file.buffer, file.mimetype || "audio/mp4");
+  return { text: out.text, language: out.language || "auto", provider: "gemini" };
 }
 
 router.post("/:id/audio", upload.single("audio"), async (req, res) => {
@@ -172,7 +157,7 @@ router.post("/:id/audio", upload.single("audio"), async (req, res) => {
 
   s.setState("transcribing");
   let out = null;
-  for (const fn of [deepgramTranscribe, groqTranscribe]) {
+  for (const fn of [deepgramTranscribe, geminiTranscribe]) {
     try {
       out = await fn(req.file);
       if (out) break;

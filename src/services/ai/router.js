@@ -1,20 +1,12 @@
 /**
- * AI PROVIDER ROUTER
- * ------------------
- * Provider CHAIN, tried in order until one answers (satisfies the
- * contract's two-provider requirement):
+ * AI PROVIDER ROUTER — GEMINI ONLY
+ * --------------------------------
+ * Single provider: Google Gemini (gemini-2.0-flash by default).
+ * Handles chat (generateReply), voice streaming (generateReplyStream via
+ * streamGenerateContent SSE) and audio transcription (transcribeAudio).
  *
- *   groq   — Llama 3.3 70B on LPU hardware. Fastest inference available,
- *            generous free tier. DEFAULT FIRST for latency.
- *   gemini — Gemini 2.0 Flash. Strong quality, small free-tier quota
- *            (the "429" you see when it runs out). DEFAULT FALLBACK.
- *
- * Order is configurable: AI_PROVIDER_ORDER=groq,gemini
- * Providers without an API key set are skipped automatically.
- *
- * Latency rule: on 429 (quota) we do NOT wait and retry — we jump straight
- * to the next provider. Retry-after-delay only happens for transient
- * network/5xx errors on the LAST provider in the chain.
+ * Transient network/5xx errors get one short-delay retry; 429 (quota)
+ * fails immediately so the caller can surface it.
  */
 
 const SYSTEM_PROMPT =
@@ -61,35 +53,6 @@ const SYSTEM_PROMPT =
 
 const TIMEOUT_MS = 30_000;
 
-// ---------------- GROQ (OpenAI-compatible API) ----------------
-
-async function callGroq(messages, system = SYSTEM_PROMPT) {
-  const key = process.env.GROQ_API_KEY;
-  if (!key) throw new Error("groq: key missing");
-  const model = process.env.GROQ_MODEL || "llama-3.3-70b-versatile";
-
-  const r = await fetch("https://api.groq.com/openai/v1/chat/completions", {
-    method: "POST",
-    headers: {
-      "content-type": "application/json",
-      authorization: `Bearer ${key}`,
-    },
-    signal: AbortSignal.timeout(TIMEOUT_MS),
-    body: JSON.stringify({
-      model,
-      messages: [
-        { role: "system", content: system },
-        ...messages.map((m) => ({ role: m.role, content: m.content })),
-      ],
-      temperature: 0.6,
-      max_tokens: 1024,
-    }),
-  });
-  if (!r.ok) throw new Error(`groq ${r.status}`);
-  const data = await r.json();
-  return data.choices?.[0]?.message?.content || "";
-}
-
 // ---------------- GEMINI ----------------
 
 async function callGemini(messages, system = SYSTEM_PROMPT) {
@@ -121,19 +84,12 @@ async function callGemini(messages, system = SYSTEM_PROMPT) {
   return data.candidates?.[0]?.content?.parts?.map((p) => p.text).join("\n") || "";
 }
 
-// ---------------- CHAIN ----------------
+// ---------------- SINGLE PROVIDER: GEMINI ----------------
 
-const PROVIDERS = {
-  groq: { call: callGroq, hasKey: () => !!process.env.GROQ_API_KEY },
-  gemini: { call: callGemini, hasKey: () => !!process.env.GEMINI_API_KEY },
-};
-
-function chain() {
-  const order = (process.env.AI_PROVIDER_ORDER || "groq,gemini")
-    .split(",")
-    .map((s) => s.trim())
-    .filter((name) => PROVIDERS[name]?.hasKey());
-  return order;
+function requireKey() {
+  const key = process.env.GEMINI_API_KEY;
+  if (!key) throw new Error("no AI provider configured — set GEMINI_API_KEY");
+  return key;
 }
 
 /**
@@ -145,68 +101,52 @@ function chain() {
  */
 async function generateReply(messages, opts = {}) {
   const system = opts.system || SYSTEM_PROMPT + (opts.extraSystem || "");
-  const order = chain();
-  if (order.length === 0) {
-    throw new Error("no AI provider configured — set GROQ_API_KEY and/or GEMINI_API_KEY");
-  }
-
-  const errors = [];
-  for (let i = 0; i < order.length; i++) {
-    const name = order[i];
-    const isLast = i === order.length - 1;
-    try {
-      return { reply: await PROVIDERS[name].call(messages, system), provider: name };
-    } catch (e) {
-      errors.push(e.message);
-      const msg = String(e.message);
-      const transient = msg.includes("timeout") || /\b5\d\d\b/.test(msg) || e.name === "TimeoutError";
-      // Last provider + transient error: one short-delay retry before giving up.
-      if (isLast && transient) {
-        await new Promise((res) => setTimeout(res, 800));
-        try {
-          return { reply: await PROVIDERS[name].call(messages, system), provider: name };
-        } catch (e2) {
-          errors.push(e2.message);
-        }
-      }
-      // Otherwise (429/quota/anything): fall through to the next provider immediately.
+  requireKey();
+  try {
+    return { reply: await callGemini(messages, system), provider: "gemini" };
+  } catch (e) {
+    const msg = String(e.message);
+    const transient = msg.includes("timeout") || /\b5\d\d\b/.test(msg) || e.name === "TimeoutError";
+    if (transient) {
+      // One short-delay retry on transient network/5xx errors.
+      await new Promise((res) => setTimeout(res, 800));
+      return { reply: await callGemini(messages, system), provider: "gemini" };
     }
+    throw e;
   }
-  throw new Error(`All providers failed: ${errors.join(" | ")}`);
 }
 
 /**
- * STREAMING (voice latency): yields text deltas from Groq as they are
- * generated so the caller can start TTS on the first sentence while the
- * rest is still being written — Gemini-Live-style time-to-first-audio.
- * Throws before the first token if Groq is unavailable; the route then
- * falls back to the non-streaming provider chain.
+ * STREAMING (voice latency): yields text deltas from Gemini as they are
+ * generated (streamGenerateContent, SSE) so the caller can start TTS on
+ * the first sentence while the rest is still being written.
+ * Throws before the first token if Gemini is unavailable; the route then
+ * falls back to the non-streaming generateReply.
  */
 async function* generateReplyStream(messages, opts = {}) {
-  const key = process.env.GROQ_API_KEY;
-  if (!key) throw new Error("groq: key missing");
+  const key = requireKey();
   const system = opts.system || SYSTEM_PROMPT + (opts.extraSystem || "");
-  const model = process.env.GROQ_MODEL || "llama-3.3-70b-versatile";
+  const model = process.env.GEMINI_MODEL || "gemini-2.0-flash";
 
-  const r = await fetch("https://api.groq.com/openai/v1/chat/completions", {
-    method: "POST",
-    headers: {
-      "content-type": "application/json",
-      authorization: `Bearer ${key}`,
-    },
-    signal: AbortSignal.timeout(TIMEOUT_MS),
-    body: JSON.stringify({
-      model,
-      stream: true,
-      messages: [
-        { role: "system", content: system },
-        ...messages.map((m) => ({ role: m.role, content: m.content })),
-      ],
-      temperature: 0.6,
-      max_tokens: 1024,
-    }),
-  });
-  if (!r.ok || !r.body) throw new Error(`groq ${r.status}`);
+  const r = await fetch(
+    `https://generativelanguage.googleapis.com/v1beta/models/${model}:streamGenerateContent?alt=sse`,
+    {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        "x-goog-api-key": key,
+      },
+      signal: AbortSignal.timeout(TIMEOUT_MS),
+      body: JSON.stringify({
+        system_instruction: { parts: [{ text: system }] },
+        contents: messages.map((m) => ({
+          role: m.role === "assistant" ? "model" : "user",
+          parts: [{ text: m.content }],
+        })),
+      }),
+    }
+  );
+  if (!r.ok || !r.body) throw new Error(`gemini ${r.status}`);
 
   const reader = r.body.getReader();
   const dec = new TextDecoder();
@@ -222,9 +162,11 @@ async function* generateReplyStream(messages, opts = {}) {
         buf = buf.slice(nl + 1);
         if (!line.startsWith("data:")) continue;
         const data = line.slice(5).trim();
-        if (data === "[DONE]") return;
+        if (!data || data === "[DONE]") continue;
         try {
-          const delta = JSON.parse(data).choices?.[0]?.delta?.content;
+          const delta = JSON.parse(data)
+            .candidates?.[0]?.content?.parts?.map((p) => p.text || "")
+            .join("");
           if (delta) yield delta;
         } catch (_) {}
       }
@@ -234,4 +176,68 @@ async function* generateReplyStream(messages, opts = {}) {
   }
 }
 
-module.exports = { generateReply, generateReplyStream };
+/**
+ * AUDIO TRANSCRIPTION via Gemini (audio is a first-class input to
+ * gemini-2.0-flash). Replaces the old Groq Whisper dependency so the
+ * whole voice loop runs on a single provider/key.
+ * @param {Buffer} buffer  raw audio bytes (m4a/aac from the app)
+ * @param {string} mimeType e.g. "audio/mp4"
+ * @param {Object} [opts] { language?: "kn", hint?: "kn" } ISO-639-1
+ * @returns {Promise<{text:string, language:string}>}
+ */
+async function transcribeAudio(buffer, mimeType, opts = {}) {
+  const key = requireKey();
+  const model = process.env.GEMINI_MODEL || "gemini-2.0-flash";
+  const mt = /^audio\//.test(String(mimeType)) ? mimeType : "audio/mp4";
+
+  let instruction =
+    "Transcribe this audio EXACTLY as spoken, in the speaker's own language " +
+    "and native script. Reply with STRICT JSON only, no markdown fences: " +
+    '{"text":"<transcript>","language":"<ISO-639-1 code>"}. ' +
+    "If the audio contains no clear speech, return {\"text\":\"\",\"language\":\"unknown\"}.";
+  if (opts.language) {
+    instruction += ` The speaker is speaking in language code "${opts.language}"; transcribe in that language.`;
+  } else if (opts.hint) {
+    instruction += ` The speaker is most likely speaking language code "${opts.hint}", but transcribe whatever language is actually spoken.`;
+  }
+
+  const r = await fetch(
+    `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent`,
+    {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        "x-goog-api-key": key,
+      },
+      signal: AbortSignal.timeout(TIMEOUT_MS),
+      body: JSON.stringify({
+        contents: [
+          {
+            role: "user",
+            parts: [
+              { inline_data: { mime_type: mt, data: buffer.toString("base64") } },
+              { text: instruction },
+            ],
+          },
+        ],
+        generationConfig: { temperature: 0, response_mime_type: "application/json" },
+      }),
+    }
+  );
+  if (!r.ok) throw new Error(`gemini stt ${r.status}`);
+  const data = await r.json();
+  const raw =
+    data.candidates?.[0]?.content?.parts?.map((p) => p.text || "").join("") || "";
+  try {
+    const parsed = JSON.parse(raw);
+    return {
+      text: String(parsed.text || "").trim(),
+      language: String(parsed.language || "unknown").slice(0, 8),
+    };
+  } catch (_) {
+    // Model ignored the JSON contract — treat the raw text as the transcript.
+    return { text: raw.trim(), language: "unknown" };
+  }
+}
+
+module.exports = { generateReply, generateReplyStream, transcribeAudio };

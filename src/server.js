@@ -198,7 +198,7 @@ app.use(
   require("./assistant/routes")
 );
 
-// Voice transcription (Whisper via Groq) — same auth as chat
+// Voice transcription (Gemini) — same auth as chat
 app.use("/stt", appAuth, perUserLimit, billing.enforce("stt"), sttRoute);
 
 // Group B — photos, documents, OCR, screenshot helper (Gemini vision).
@@ -254,7 +254,7 @@ require("./db")
         console.warn(
           "WARNING: GEMINI_API_KEY not set — /vision and /docs analysis " +
             "(Group B: photos, PDFs, OCR, screenshots) will return 503. " +
-            "Chat still works if GROQ_API_KEY is set."
+            "Chat and voice will NOT work without it."
         );
       }
     });

@@ -68,7 +68,7 @@ router.post("/", receiveFile, async (req, res) => {
     }
     const key = process.env.GEMINI_API_KEY;
     if (!key) {
-      // Chat can run on Groq alone, but vision NEEDS Gemini — make the
+      // Vision needs Gemini specifically — make the
       // misconfiguration loud in the logs so it isn't mistaken for a
       // client-side network problem.
       console.error("vision: GEMINI_API_KEY is not set — /vision disabled");

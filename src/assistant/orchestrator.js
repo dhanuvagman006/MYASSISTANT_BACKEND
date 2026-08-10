@@ -4,7 +4,7 @@
  * Turn flow (all progress is pushed over the session's SSE stream):
  *
  *   user text/transcript
- *     -> thinking            (LLM w/ FUNCTION CALLING on Groq; regex fallback)
+ *     -> thinking            (LLM w/ FUNCTION CALLING on Gemini; regex fallback)
  *        -> respond_to_user               : speak a direct reply
  *        -> search_web                    : searching -> results + spoken summary
  *        -> find_contact + place_call...  : finding_contact -> app resolves the
@@ -177,40 +177,46 @@ const TOOLS = [
   },
 ];
 
-/** One Groq chat completion WITH tools. Throws on any failure. */
+/** One Gemini generation WITH function calling. Throws on any failure. */
 async function llmDecide(history) {
-  const key = process.env.GROQ_API_KEY;
-  if (!key) throw new Error("groq key missing");
-  const r = await fetch("https://api.groq.com/openai/v1/chat/completions", {
-    method: "POST",
-    headers: {
-      "content-type": "application/json",
-      authorization: `Bearer ${key}`,
-    },
-    signal: AbortSignal.timeout(TIMEOUT_MS),
-    body: JSON.stringify({
-      model: process.env.GROQ_MODEL || "llama-3.3-70b-versatile",
-      messages: [{ role: "system", content: SYSTEM_PROMPT }, ...history],
-      tools: TOOLS,
-      tool_choice: "required",
-      temperature: 0.4,
-      max_tokens: 600,
-    }),
-  });
-  if (!r.ok) throw new Error(`groq ${r.status}`);
+  const key = process.env.GEMINI_API_KEY;
+  if (!key) throw new Error("gemini key missing");
+  const model = process.env.GEMINI_MODEL || "gemini-2.0-flash";
+  const r = await fetch(
+    `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent`,
+    {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        "x-goog-api-key": key,
+      },
+      signal: AbortSignal.timeout(TIMEOUT_MS),
+      body: JSON.stringify({
+        system_instruction: { parts: [{ text: SYSTEM_PROMPT }] },
+        contents: history.map((m) => ({
+          role: m.role === "assistant" ? "model" : "user",
+          parts: [{ text: String(m.content || "") }],
+        })),
+        // TOOLS is kept in OpenAI shape ({type:"function", function:{...}});
+        // Gemini wants the inner object as a functionDeclaration.
+        tools: [{ functionDeclarations: TOOLS.map((t) => t.function) }],
+        toolConfig: { functionCallingConfig: { mode: "ANY" } },
+        generationConfig: { temperature: 0.4, maxOutputTokens: 600 },
+      }),
+    }
+  );
+  if (!r.ok) throw new Error(`gemini ${r.status}`);
   const data = await r.json();
-  const msg = data.choices?.[0]?.message;
-  const tc = msg?.tool_calls?.[0];
-  if (tc?.function?.name) {
-    let args = {};
-    try {
-      args = JSON.parse(tc.function.arguments || "{}");
-    } catch (_) {}
-    return { tool: tc.function.name, args };
+  const parts = data.candidates?.[0]?.content?.parts || [];
+  const fc = parts.find((p) => p.functionCall)?.functionCall;
+  if (fc?.name) {
+    // Gemini returns args as a ready object (no JSON string to parse).
+    return { tool: fc.name, args: fc.args || {} };
   }
-  // Model answered in plain text despite tool_choice — treat as a reply.
-  if (msg?.content) return { tool: "respond_to_user", args: { reply: msg.content } };
-  throw new Error("groq: empty decision");
+  // Model answered in plain text despite mode ANY — treat as a reply.
+  const text = parts.map((p) => p.text || "").join("").trim();
+  if (text) return { tool: "respond_to_user", args: { reply: text } };
+  throw new Error("gemini: empty decision");
 }
 
 /**

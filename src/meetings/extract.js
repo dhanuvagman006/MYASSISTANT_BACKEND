@@ -4,7 +4,7 @@
  *
  * Design:
  *  - The LLM call is INJECTABLE ({ generate }) so unit tests run with a
- *    fake and no API keys; production uses services/ai/router (Groq→Gemini
+ *    fake and no API keys; production uses services/ai/router (Gemini
  *    fallback chain, so provider outages degrade gracefully for free).
  *  - The model's output is never trusted: parseExtraction() strips code
  *    fences, JSON-parses, then validateExtraction() coerces the result

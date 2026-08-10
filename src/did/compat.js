@@ -17,7 +17,7 @@
  *    JWT {uid, mode}) at agent-creation time → per-user personalization
  *    with zero trust in the client.
  *
- * Latency: D-ID wants TTFT of 200–500ms. We reuse the same Groq-first
+ * Latency: D-ID wants TTFT of 200–500ms. We reuse the same Gemini
  * streaming chain as /chat/stream, which starts in well under a second.
  */
 const router = require("express").Router();
