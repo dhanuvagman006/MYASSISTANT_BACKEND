@@ -64,28 +64,50 @@ async function api(method, path, body) {
  * set DID_PRESENTER_SOURCE_URL to a photo of Hari's own custom face
  * (V3 Instant Avatar footage or a brand portrait) to look unique.
  */
-function presenterConfig() {
-  const src = process.env.DID_PRESENTER_SOURCE_URL;
+function presenterConfig(gender) {
+  // gender = the AVATAR's gender ('male' | 'female'), already resolved as
+  // the opposite of the user's. Per-gender custom faces first, then
+  // per-gender stock presenters, then the legacy single-face env vars.
+  const srcByGender =
+    gender === "male"
+      ? process.env.DID_PRESENTER_SOURCE_URL_MALE
+      : process.env.DID_PRESENTER_SOURCE_URL_FEMALE;
+  const src = srcByGender || process.env.DID_PRESENTER_SOURCE_URL;
   if (src) {
     return {
       type: "talk", // photo-based presenter streamed over WebRTC
       source_url: src,
-      voice: voiceConfig(),
+      voice: voiceConfig(gender),
     };
+  }
+  const idByGender =
+    gender === "male"
+      ? process.env.DID_PRESENTER_ID_MALE
+      : process.env.DID_PRESENTER_ID_FEMALE;
+  if (gender === "male" && !idByGender && !process.env.DID_PRESENTER_ID) {
+    console.warn(
+      "DID_PRESENTER_ID_MALE not set — male avatar falls back to the default (female) presenter. " +
+        "Pick a male presenter id from GET https://api.d-id.com/clips/presenters and set it."
+    );
   }
   return {
     type: "clip", // stock Full-HD presenter
-    presenter_id: process.env.DID_PRESENTER_ID || "v2_public_Amber@0zSz8kflCN",
-    voice: voiceConfig(),
+    presenter_id:
+      idByGender || process.env.DID_PRESENTER_ID || "v2_public_Amber@0zSz8kflCN",
+    voice: voiceConfig(gender),
   };
 }
 
-function voiceConfig() {
+function voiceConfig(gender) {
+  // Multilingual Indian neural voices → speak Kannada/Hindi/English as
+  // Hari switches language mid-conversation. Voice matches the avatar.
+  const byGender =
+    gender === "male"
+      ? process.env.DID_VOICE_ID_MALE || "en-IN-PrabhatIndicNeural"
+      : process.env.DID_VOICE_ID_FEMALE;
   return {
     type: "microsoft",
-    // Multilingual neural voice → speaks Kannada/Hindi/English as Hari
-    // switches language mid-conversation.
-    voice_id: process.env.DID_VOICE_ID || "en-IN-AartiIndicNeural",
+    voice_id: byGender || process.env.DID_VOICE_ID || "en-IN-AartiIndicNeural",
   };
 }
 
@@ -94,10 +116,10 @@ function voiceConfig() {
  * `userToken` is a signed JWT identifying the user + mode; D-ID attaches
  * it as a header on every LLM call so /did/llm can personalize.
  */
-async function createAgent({ name, instructions, llmUrl, llmKey, userToken, greeting }) {
+async function createAgent({ name, instructions, llmUrl, llmKey, userToken, greeting, avatarGender }) {
   return api("POST", "/agents", {
     preview_name: name,
-    presenter: presenterConfig(),
+    presenter: presenterConfig(avatarGender),
     llm: {
       type: "custom",
       provider: "custom",

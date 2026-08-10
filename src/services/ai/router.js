@@ -79,7 +79,10 @@ async function callGemini(messages, system = SYSTEM_PROMPT) {
       }),
     }
   );
-  if (!r.ok) throw new Error(`gemini ${r.status}`);
+  if (!r.ok) {
+    const body = await r.text().catch(() => "");
+    throw new Error(`gemini ${r.status} ${body.slice(0, 300)}`);
+  }
   const data = await r.json();
   return data.candidates?.[0]?.content?.parts?.map((p) => p.text).join("\n") || "";
 }
@@ -146,7 +149,10 @@ async function* generateReplyStream(messages, opts = {}) {
       }),
     }
   );
-  if (!r.ok || !r.body) throw new Error(`gemini ${r.status}`);
+  if (!r.ok || !r.body) {
+    const body = r.ok ? "" : await r.text().catch(() => "");
+    throw new Error(`gemini stream ${r.status} ${body.slice(0, 300)}`);
+  }
 
   const reader = r.body.getReader();
   const dec = new TextDecoder();
@@ -188,7 +194,12 @@ async function* generateReplyStream(messages, opts = {}) {
 async function transcribeAudio(buffer, mimeType, opts = {}) {
   const key = requireKey();
   const model = process.env.GEMINI_MODEL || "gemini-2.0-flash";
-  const mt = /^audio\//.test(String(mimeType)) ? mimeType : "audio/mp4";
+  // The app records .m4a (AAC in an MP4 container). Normalize the label,
+  // and keep a fallback: some Gemini deployments accept audio/mp4 but not
+  // audio/aac, others the reverse — a 4xx triggers ONE retry with the
+  // alternate before giving up.
+  let mt = /^audio\//.test(String(mimeType)) ? String(mimeType) : "audio/mp4";
+  if (/m4a/.test(mt)) mt = "audio/mp4";
 
   let instruction =
     "Transcribe this audio EXACTLY as spoken, in the speaker's own language " +
@@ -224,7 +235,15 @@ async function transcribeAudio(buffer, mimeType, opts = {}) {
       }),
     }
   );
-  if (!r.ok) throw new Error(`gemini stt ${r.status}`);
+  if (!r.ok) {
+    const body = await r.text().catch(() => "");
+    const alt = mt === "audio/mp4" ? "audio/aac" : "audio/mp4";
+    if (r.status >= 400 && r.status < 500 && !opts._retried) {
+      console.warn(`gemini stt ${r.status} with ${mt} — retrying as ${alt}:`, body.slice(0, 200));
+      return transcribeAudio(buffer, alt, { ...opts, _retried: true });
+    }
+    throw new Error(`gemini stt ${r.status} ${body.slice(0, 300)}`);
+  }
   const data = await r.json();
   const raw =
     data.candidates?.[0]?.content?.parts?.map((p) => p.text || "").join("") || "";

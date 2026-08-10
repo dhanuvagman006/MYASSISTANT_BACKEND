@@ -21,6 +21,7 @@ const router = require("express").Router();
 const jwt = require("jsonwebtoken");
 const did = require("./client");
 const store = require("./store");
+const db = require("../db");
 const { todayBriefing } = require("./briefing");
 const { effectivePlan } = require("../billing/store");
 const { isPaidPlan } = require("../billing/plans");
@@ -65,14 +66,22 @@ router.post("/session", async (req, res) => {
   if (!gate.ok) return res.status(402).json({ error: gate.reason, code: "pro_required" });
 
   try {
-    // 1) Ensure this user's agent (per mode) exists on D-ID.
-    let agentId = (await store.getAgent(userId || 0, mode))?.agent_id;
+    // Avatar gender = OPPOSITE of the user's (client spec): a male user
+    // talks to a girl's face, a female user to a boy's. Unset -> female.
+    const account = userId ? await db.findById(userId) : null;
+    const avatarGender = account?.gender === "female" ? "male" : "female";
+
+    // 1) Ensure this user's agent (per mode+gender) exists on D-ID — the
+    // gender is part of the cache key so changing it rebuilds the face.
+    const modeKey = `${mode}:${avatarGender}`;
+    let agentId = (await store.getAgent(userId || 0, modeKey))?.agent_id;
     if (!agentId) {
       // Long-lived token D-ID replays to /did/llm on every turn.
       const userToken = jwt.sign({ uid: userId || 0, mode }, process.env.JWT_SECRET, {
         expiresIn: "365d",
       });
       const agent = await did.createAgent({
+        avatarGender,
         name: mode === "interview" ? "Hari (first meeting)" : "Hari",
         llmUrl: `${publicBase()}/did/llm/v1/chat/completions`,
         llmKey: process.env.DID_LLM_KEY,
@@ -83,7 +92,7 @@ router.post("/session", async (req, res) => {
             : "Hello! Lovely to see you. How can I help?",
       });
       agentId = agent.id;
-      await store.saveAgent(userId || 0, mode, agentId);
+      await store.saveAgent(userId || 0, modeKey, agentId);
     }
 
     // 2) Client key locked to OUR hosted page's origin.
