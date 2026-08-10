@@ -9,6 +9,7 @@ services:
     env_file: .env
     environment:
       DATABASE_URL: postgres://myassistant:localdev@postgres:5432/myassistant
+      NODE_ENV: development
     depends_on:
       postgres:
         condition: service_healthy
