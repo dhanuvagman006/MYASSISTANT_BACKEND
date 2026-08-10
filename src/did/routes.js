@@ -60,7 +60,14 @@ router.post("/session", async (req, res) => {
   const userId = userIdOf(req);
   const mode = req.body?.mode === "interview" ? "interview" : "assistant";
   if (!did.enabled() || !publicBase()) {
-    return res.status(503).json({ error: "face mode not configured" });
+    // Say exactly WHY, so local setups can fix it from the logs.
+    const missing = [
+      !process.env.DID_API_KEY && "DID_API_KEY",
+      !process.env.DID_LLM_KEY && "DID_LLM_KEY",
+      !publicBase() && "PUBLIC_BASE_URL",
+    ].filter(Boolean);
+    console.warn(`face mode not configured — missing: ${missing.join(", ") || "unknown"}`);
+    return res.status(503).json({ error: "face mode not configured", missing });
   }
   const gate = await faceAllowed(userId, mode);
   if (!gate.ok) return res.status(402).json({ error: gate.reason, code: "pro_required" });
@@ -209,5 +216,24 @@ async function briefingHandler(req, res, generate) {
 }
 router.get("/briefing", (req, res) => briefingHandler(req, res, false));
 router.post("/briefing", (req, res) => briefingHandler(req, res, true));
+
+/**
+ * GET /did/presenter — the REAL human face the signed-in user will meet:
+ * gender-opposite presenter's photo, for the app's home-screen hero.
+ * Works even before a streaming session (no agent/credits needed).
+ */
+router.get("/presenter", async (req, res) => {
+  if (!did.enabled()) return res.status(503).json({ error: "face mode not configured" });
+  try {
+    const userId = userIdOf(req);
+    const account = userId ? await db.findById(userId) : null;
+    const avatarGender = account?.gender === "female" ? "male" : "female";
+    const photo = await did.presenterPhoto(avatarGender);
+    res.json({ gender: avatarGender, ...photo });
+  } catch (e) {
+    console.error("did presenter:", e.message);
+    res.status(502).json({ error: "presenter unavailable" });
+  }
+});
 
 module.exports = router;

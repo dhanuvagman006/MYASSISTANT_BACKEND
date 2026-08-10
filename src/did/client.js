@@ -177,7 +177,59 @@ async function getTalk(talkId) {
   return api("GET", `/talks/${encodeURIComponent(talkId)}`);
 }
 
+/* ------------------------------------------------------------------ */
+/* Presenter photo (the REAL face shown on the app's home screen)      */
+/* ------------------------------------------------------------------ */
+
+let _presentersCache = { at: 0, list: null };
+
+/** All stock presenters, cached for 12h (they rarely change). */
+async function listPresenters() {
+  const now = Date.now();
+  if (_presentersCache.list && now - _presentersCache.at < 12 * 3600e3) {
+    return _presentersCache.list;
+  }
+  const data = await api("GET", "/clips/presenters?limit=200");
+  const list = Array.isArray(data?.presenters) ? data.presenters : [];
+  _presentersCache = { at: now, list };
+  return list;
+}
+
+/**
+ * The photo of the avatar the user will meet — resolves exactly the same
+ * presenter presenterConfig() would use for this gender, and returns its
+ * image so the home screen can show the real human face.
+ * @returns {Promise<{imageUrl:string|null, presenterId:string|null}>}
+ */
+async function presenterPhoto(gender) {
+  const srcByGender =
+    gender === "male"
+      ? process.env.DID_PRESENTER_SOURCE_URL_MALE
+      : process.env.DID_PRESENTER_SOURCE_URL_FEMALE;
+  const src = srcByGender || process.env.DID_PRESENTER_SOURCE_URL;
+  if (src) return { imageUrl: src, presenterId: null };
+
+  const idByGender =
+    gender === "male"
+      ? process.env.DID_PRESENTER_ID_MALE
+      : process.env.DID_PRESENTER_ID_FEMALE;
+  const id =
+    idByGender || process.env.DID_PRESENTER_ID || "v2_public_Amber@0zSz8kflCN";
+  try {
+    const list = await listPresenters();
+    const p = list.find((x) => x.presenter_id === id);
+    if (p) return { imageUrl: p.image_url || p.thumbnail_url || null, presenterId: id };
+    // Configured id not in the public list (e.g. premium) — fall through.
+    return { imageUrl: null, presenterId: id };
+  } catch (e) {
+    console.warn("did presenterPhoto:", e.message);
+    return { imageUrl: null, presenterId: id };
+  }
+}
+
 module.exports = {
+  listPresenters,
+  presenterPhoto,
   enabled,
   createAgent,
   deleteAgent,
