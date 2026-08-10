@@ -19,16 +19,18 @@ module.exports = {
     "First internal build — chat with live AI",
   ],
 
-  announcement: "New: meet Hari face to face — tap the video icon on the Assistant tab ✨",
+  announcement: null,
 
+  // Rebuild-from-scratch reset: every removed feature is OFF so installed
+  // apps hide their entry points. Flip back only when a feature returns.
   features: {
-    voice_mode: false,        // A2 — flip when voice ships
-    morning_briefing: false,  // C2
-    face_mode: true,          // D-ID streaming avatar ("Face Mode", Pro)
-    face_interview: true,     // first-meeting interview conducted by the face
-    video_briefing: true,     // D-ID daily video briefing on the Today screen
-    photo_questions: false,   // B1
-    live_info_cards: false,   // A5 structured answer cards
-    agent_calls: true,        // "call X and ask Y" — AI talks on the call
+    voice_mode: true,         // speak in -> spoken reply out (Gemini)
+    morning_briefing: false,
+    face_mode: false,
+    face_interview: false,
+    video_briefing: false,
+    photo_questions: true,    // photos/receipts via /vision + /docs
+    live_info_cards: false,
+    agent_calls: false,
   },
 };
