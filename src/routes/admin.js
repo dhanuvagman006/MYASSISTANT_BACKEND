@@ -5,7 +5,6 @@
  */
 const router = require("express").Router();
 const crypto = require("crypto");
-const billing = require("../billing/store");
 
 router.use((req, res, next) => {
   const key = process.env.ADMIN_KEY || "";
@@ -19,7 +18,7 @@ router.use((req, res, next) => {
 });
 
 router.get("/stats", async (_req, res) => {
-  res.json({ ts: Date.now(), ...(await billing.stats()) });
+  res.json({ ts: Date.now() });
 });
 
 // ---- APK publishing (self-hosted update channel, see routes/appUpdate.js) ----

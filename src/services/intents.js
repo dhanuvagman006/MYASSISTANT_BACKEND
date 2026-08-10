@@ -23,12 +23,9 @@ const currency = require("./tools/currency");
 const units = require("./tools/units");
 const news = require("./tools/news");
 const reminders = require("../reminders/store");
-const memory = require("../memory/store");
 const docsStore = require("../docs/store");
 const gtokens = require("../google/tokens");
 const gapi = require("../google/api");
-const swiggyTokens = require("../swiggy/tokens");
-const food = require("../swiggy/order");
 
 const RE = {
   remindSet: /\b(remind me|set (a |an )?(reminder|alarm)|reminder (to|for)|don'?t let me forget)\b/i,
@@ -44,8 +41,6 @@ const RE = {
     /\b(near ?(me|by|est)|nearby|closest|around here|walking distance)\b|\bnear my (place|home|location)\b/i,
   docRecall:
     /\b(reports?|documents?|prescriptions?|receipts?|recipes?|records?|scan|photocopy|test results?|x-?rays?|lab (results?|reports?)|medical (file|history)|bill|invoice)\b|\b(doctor|hospital|clinic)\b.{0,40}\b(said|told|suggested|suggestions?|advice|advised|gave|prescribed|recommend\w*)\b|\b(said|told|suggested|suggestions?|advice|advised|gave|prescribed|recommend\w*)\b.{0,40}\b(doctor|hospital|clinic)\b/i,
-  foodOrder:
-    /\b(order|get|bring|deliver|book)\b.{0,40}\b(food|pizza|biryani|burger|dosa|idli|noodles|momos|thali|shawarma|rolls?|sandwich|cake|ice ?cream|meals?|dinner|lunch|breakfast|snacks?)\b|\bswiggy\b.{0,30}\border\b|\border\b.{0,30}\bswiggy\b|\bswiggy\b.{0,60}\b(food|pizza|biryani|burger|dosa|idli|noodles|momos|thali|shawarma|rolls?|sandwich|cake|ice ?cream|meals?|dinner|lunch|breakfast|snacks?)\b|\b(food|pizza|biryani|burger|dosa|idli|noodles|momos|thali|shawarma|rolls?|sandwich|cake|ice ?cream|meals?|dinner|lunch|breakfast|snacks?)\b.{0,60}\bswiggy\b|\b(order|get|bring|deliver|book)\b.{0,25}\b(something|anything)( else| to eat| to drink)?\b|\bi('| a)?m (really |so |very )?hungry\b/i,
   calCreate:
     /\b(schedule|create|add|put|set ?up|book|arrange|fix)\b.{0,40}\b(meeting|event|appointment|call)\b|\b(meeting|event|appointment)\b.{0,30}\b(schedule|create|add|put|book)\b|\badd (it |this )?to (my )?calendar\b/i,
   draftReply:
@@ -56,18 +51,6 @@ const RE = {
   no: /^\s*(no|nope|nah|cancel|don'?t|stop|leave it|beda|nako|nahi|नहीं|ಬೇಡ|வேண்டாம்|వద్దు)[.! ]*$/i,
 };
 
-/** "order a large veg pizza from swiggy please" → "large veg pizza" */
-function extractCraving(msg) {
-  let s = norm(msg)
-    .replace(/\b(hey|hi|ok(ay)?|please|pls|can you|could you|will you|for me|right now|now|today|tonight|on|from|via|using|swiggy)\b/g, " ")
-    .replace(/\b(find|search|show|suggest|recommend|best|good|top|near ?(me|by)?|nearby|around|here)\b/g, " ")
-    .replace(/\b(order|get|bring|deliver|book|buy|want|need|i|am|is|a|an|some|the|my|me)\b/g, " ")
-    .replace(/[^\p{L}\p{N} ]/gu, " ")
-    .replace(/\s{2,}/g, " ")
-    .trim();
-  if (!s || /^(hungry|something|anything|something else|anything else|else|eat|drink|to eat|to drink)$/.test(s)) s = "food";
-  return s.slice(0, 60);
-}
 const norm = (s) => String(s || "").toLowerCase();
 
 /** "remind me to call amma tomorrow at 5" → { text, dueAt } */
@@ -98,7 +81,7 @@ function parseReminder(msg, now, tzOffsetMin) {
  * D3 — pending calendar-event confirmations. Hari SPEAKS a preview
  * ("Tuesday 5 pm, 'Dentist' — shall I add it?"); the next "yes" creates
  * the real event, "no" discards. In-memory with a 2-minute TTL (same
- * pattern as the Swiggy confirm). NOTE for horizontal scale: move this
+ * pattern). NOTE for horizontal scale: move this
  * Map to Redis when the API runs on more than one node.
  */
 const pendingEvents = new Map(); // see note above // userId -> { title, startMs, endMs, expires }
@@ -135,11 +118,7 @@ function parseEventAsk(msg, now, tzOffsetMin) {
  */
 async function buildToolContext({ userId, messages, tzOffsetMin = 330, lat, lng }) {
   const lastUser = [...(messages || [])].reverse().find((m) => m.role === "user");
-  // STT regularly mishears the brand: "Spiggy", "Sviggy", "Swigi",
-  // "Swiggie"… canonicalize before any intent regex runs so a misheard
-  // brand still routes to the Swiggy flow instead of generic search.
-  const msg = (lastUser ? String(lastUser.content || "") : "")
-    .replace(/\bs[pvw]ig+[iy]e?\b/gi, "swiggy");
+  const msg = lastUser ? String(lastUser.content || "") : "";
   const now = new Date();
 
   // Assistants must know the clock. Rendered in the user's timezone.
@@ -157,9 +136,6 @@ async function buildToolContext({ userId, messages, tzOffsetMin = 330, lat, lng 
 
   if (msg) {
     try {
-      // ---- FOOD ORDER (Swiggy MCP) — checked FIRST because a bare
-      // "yes"/"no" is meaningless to every other intent. Real money:
-      // the flow is deterministic and two-turn; the AI only phrases it. ----
       // ---- CALENDAR EVENT CONFIRM (D3) — a bare yes/no resolves a spoken
       // event preview. Deterministic write; the AI only phrases the result. ----
       if (userId && getPendingEvent(userId) && (RE.yes.test(msg) || RE.no.test(msg))) {
@@ -184,38 +160,6 @@ async function buildToolContext({ userId, messages, tzOffsetMin = 330, lat, lng 
                   ? "the calendar write permission is missing — ask them to reconnect Google from the You tab"
                   : "Google Calendar is unreachable right now") +
                 "). NO event exists; never claim it was created."
-            );
-          }
-        }
-        return { block: "\n\n" + blocks.join("\n\n"), sources, documents };
-      }
-
-      if (userId && food.hasPending(userId) && (RE.yes.test(msg) || RE.no.test(msg))) {
-        const r = RE.yes.test(msg)
-          ? await food.confirmPending(userId)
-          : await food.cancelPending(userId);
-        blocks.push("TOOL RESULT — SWIGGY: " + r.say);
-        sources.push({ name: "Swiggy", url: "https://www.swiggy.com" });
-        return { block: "\n\n" + blocks.join("\n\n"), sources, documents };
-      }
-      if (userId && RE.foodOrder.test(msg)) {
-        if (!(await swiggyTokens.isLinked(userId))) {
-          blocks.push(
-            "TOOL RESULT — SWIGGY: the user asked to order food but has NOT " +
-              "linked their Swiggy account. Tell them to open the You tab and " +
-              "tap Connect Swiggy, then ask again. Do not pretend to order."
-          );
-        } else {
-          try {
-            const r = await food.prepareOrder(userId, extractCraving(msg));
-            blocks.push("TOOL RESULT — SWIGGY: " + r.say);
-            sources.push({ name: "Swiggy", url: "https://www.swiggy.com" });
-          } catch (e) {
-            console.error("swiggy prepare failed:", e.message);
-            blocks.push(
-              "TOOL RESULT — SWIGGY: ordering failed (" +
-                (e.code === "NOT_LINKED" ? "account link expired — ask them to reconnect Swiggy in the You tab" : "service unavailable") +
-                "). NO order was placed and NO cart exists. Apologize briefly; never claim an order happened."
             );
           }
         }
@@ -253,7 +197,7 @@ async function buildToolContext({ userId, messages, tzOffsetMin = 330, lat, lng 
       if (RE.weather.test(msg)) {
         const cityAsk = msg.match(RE.inCity)?.[1]?.trim();
         const cityMem = userId
-          ? (await memory.listMemories(userId)).find((m) => m.key === "current_city")
+          ? null /* memory system removed */
               ?.value?.replace(/^is currently in\s*/i, "")
           : null;
         const w = await weather.getWeather({

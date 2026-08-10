@@ -18,7 +18,6 @@ const { OAuth2Client } = require("google-auth-library");
 const { createRemoteJWKSet, jwtVerify } = require("jose");
 
 const db = require("../db");
-const memory = require("../memory/store");
 
 const JWT_SECRET = process.env.JWT_SECRET;
 const SESSION_DAYS = 30;
@@ -58,8 +57,6 @@ router.post("/signup", async (req, res) => {
     provider: "email",
     gender: db.cleanGender(gender),
   });
-  // First memories: whatever the user gave us at sign-up.
-  await memory.seedProfile(user.id, { name: user.name, email: user.email });
   respond(res, user, true);
 });
 
@@ -90,15 +87,6 @@ router.post("/google", async (req, res) => {
       email: p.email,
       name: p.name,
     });
-    // Seed memory from the Google profile: name, given name, email, photo,
-    // locale. Runs on every Google sign-in (upsert), so a later profile
-    // change on Google's side refreshes these too.
-    await memory.seedProfile(user.id, {
-      name: p.name,
-      givenName: p.given_name,
-      email: p.email,
-      locale: p.locale,
-    });
     respond(res, user, created);
   } catch {
     res.status(401).json({ error: "invalid Google token" });
@@ -123,7 +111,6 @@ router.post("/apple", async (req, res) => {
       // the app forwards it here so we don't lose it.
       name: typeof name === "string" ? name.trim().slice(0, 100) : null,
     });
-    await memory.seedProfile(user.id, { name: user.name, email: user.email });
     respond(res, user, created);
   } catch {
     res.status(401).json({ error: "invalid Apple token" });

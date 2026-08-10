@@ -1,12 +1,12 @@
 {
   "name": "myassistant-backend",
   "version": "0.1.0",
-  "description": "MYASSISTANT backend — AI routing, remote config, user services",
+  "description": "MYASSISTANT backend \u2014 AI routing, remote config, user services",
   "main": "src/server.js",
   "scripts": {
     "start": "node src/server.js",
     "dev": "node --watch src/server.js",
-    "test": "node scripts/memory-semantic-test.js && node scripts/audit-test.js && node scripts/smoke-test.js && node scripts/agentcall-test.js && node scripts/billing-test.js && node scripts/features-test.js && node scripts/meetings-focus-test.js"
+    "test": "node scripts/audit-test.js && node scripts/smoke-test.js"
   },
   "engines": {
     "node": ">=20"

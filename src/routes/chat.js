@@ -1,7 +1,5 @@
 const router = require("express").Router();
 const { generateReply, generateReplyStream } = require("../services/ai/router");
-const { buildMemoryPrompt } = require("../memory/store");
-const { extractAndSave } = require("../memory/extractor");
 const { buildToolContext } = require("../services/intents");
 
 /** Numeric DB user id for signed-in accounts; null for dev/app-key sessions. */
@@ -43,16 +41,6 @@ router.post("/", async (req, res) => {
   const userId = userIdOf(req);
 
   try {
-    // Personalization: everything Hari knows about THIS user rides along
-    // as an addition to the system prompt on every single reply.
-    // SEMANTIC RECALL: embed what the user just said IN PARALLEL with the
-    // intent tools below — by the time we build the memory block the vector
-    // is (usually) ready, so relevance ranking costs ~zero extra latency.
-    const lastUserMsg = [...trimmed].reverse().find((m) => m.role === "user");
-    const queryVecP =
-      userId && lastUserMsg
-        ? require("../memory/embeddings").embedText(lastUserMsg.content, "RETRIEVAL_QUERY")
-        : Promise.resolve(null);
     // Tools: intents (reminders/weather/news/clock) run first — they may
     // EXECUTE actions and inject live data the AI must answer from.
     const toolCtx = await buildToolContext({
@@ -64,15 +52,7 @@ router.post("/", async (req, res) => {
     });
     // A4 — user-selected style rides on headers; a plain string concat,
     // so personalization costs zero extra latency.
-    const extraSystem =
-      (userId
-        ? await buildMemoryPrompt(userId, {
-            excludeDocFacts: (toolCtx.documents || []).length > 0,
-            queryVec: queryVecP,
-          })
-        : "") +
-      toolCtx.block +
-      styleDirective(req);
+    const extraSystem = toolCtx.block + styleDirective(req);
     const { reply, provider } = await generateReply(trimmed, { extraSystem });
     res.json({
       reply: reply || "Sorry, I couldn't answer that.",
@@ -81,12 +61,6 @@ router.post("/", async (req, res) => {
       provider,
     });
 
-    // Learning: AFTER the response is sent, quietly check whether this
-    // exchange taught us something durable about the user. Never awaited.
-    if (userId && reply) {
-      const lastUser = [...trimmed].reverse().find((m) => m.role === "user");
-      if (lastUser) extractAndSave(userId, lastUser.content, reply);
-    }
   } catch (e) {
     console.error("All providers failed:", e.message);
     res.status(502).json({ reply: "The assistant is unavailable right now. Please try again.", sources: [] });
@@ -121,12 +95,6 @@ router.post("/stream", async (req, res) => {
   const send = (obj) => res.write(JSON.stringify(obj) + "\n");
 
   try {
-    // Semantic recall vector — computed in parallel with the tools (see /chat).
-    const lastUserMsg = [...trimmed].reverse().find((m) => m.role === "user");
-    const queryVecP =
-      userId && lastUserMsg
-        ? require("../memory/embeddings").embedText(lastUserMsg.content, "RETRIEVAL_QUERY")
-        : Promise.resolve(null);
     const ctx = await buildToolContext({
       userId,
       messages: trimmed,
@@ -137,7 +105,6 @@ router.post("/stream", async (req, res) => {
     sources = ctx.sources;
     documents = ctx.documents || [];
     const extraSystem =
-      (userId ? await buildMemoryPrompt(userId, { queryVec: queryVecP }) : "") +
       ctx.block +
       styleDirective(req);
 
@@ -165,41 +132,22 @@ router.post("/stream", async (req, res) => {
   }
   res.end();
 
-  if (userId && full) {
-    const lastUser = [...trimmed].reverse().find((m) => m.role === "user");
-    if (lastUser) extractAndSave(userId, lastUser.content, full);
-  }
 });
 
 /**
  * POST /chat/greeting — spoken greeting for app open / sign-in.
- * Personalized from memory; if Hari barely knows the user yet, it asks
- * ONE friendly question so the extractor can start learning about them.
  */
 router.post("/greeting", async (req, res) => {
-  const userId = userIdOf(req);
-  const memoryBlock = userId ? await buildMemoryPrompt(userId) : "";
-  const known = userId ? await require("../memory/store").listMemories(userId) : [];
-  const learned = known.filter((m) => m.category !== "profile").length;
-
-  const directive =
-    learned < 3
-      ? "You know almost nothing about them yet, so after greeting, ask exactly ONE " +
-        "short, friendly question to get to know them — for example what they'd like " +
-        "to be called, which city they live in, or what they do. Just one question."
-      : "Weave in ONE personal touch from what you remember (their city, a preference, " +
-        "their work) so it feels like a friend who knows them. You may ask one light " +
-        "follow-up question about something you remember, or none.";
-
+  const name = req.user?.name ? String(req.user.name).split(" ")[0] : null;
   try {
     const { reply } = await generateReply(
       [{ role: "user", content: "(The user just opened the app and signed in. Greet them.)" }],
       {
         extraSystem:
-          memoryBlock +
+          (name ? `\n\nThe user's name is ${name}.` : "") +
           "\n\nTASK: The user just opened the app. Greet them warmly by name if you " +
           "know it, matching the time of day if unknown just be warm. Maximum two short " +
-          "spoken sentences. " + directive,
+          "spoken sentences.",
       }
     );
     res.json({ greeting: reply || "Hi! I'm Hari. What should I call you?" });

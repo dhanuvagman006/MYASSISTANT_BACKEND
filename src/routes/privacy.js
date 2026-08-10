@@ -28,19 +28,10 @@ const filesRoot = path.join(
 
 /** tables that key rows by a user column → [table, column] */
 const USER_TABLES = [
-  ["memories", "user_id"],
   ["actions_log", "user_id"],
   ["reminders", "user_id"],
   ["documents", "user_id"],
   ["google_tokens", "user_id"],
-  ["swiggy_tokens", "user_id"],
-  ["agent_calls", "user_id"],
-  ["agent_call_settings", "user_id"],
-  ["subscriptions", "user_id"],
-  ["usage", "user_id"],
-  ["payments", "user_id"],
-  ["family_members", "user_id"],
-  ["families", "owner_id"],
 ];
 
 async function existingUserTables() {

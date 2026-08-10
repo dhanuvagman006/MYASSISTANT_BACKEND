@@ -9,7 +9,6 @@
  *
  * Upload flow: file is written to disk FIRST (the save can never be lost
  * to an AI hiccup), then one Gemini call fills title/summary/date/tags.
- * A short memory fact is also written so future chats know the visit
  * happened even before any document search runs.
  */
 const router = require("express").Router();
@@ -17,8 +16,6 @@ const multer = require("multer");
 const fs = require("fs");
 const docs = require("../docs/store");
 const { analyzeDocument } = require("../docs/analyze");
-const memory = require("../memory/store");
-const billing = require("../billing/routes");
 const audit = require("../audit/log");
 
 const upload = multer({
@@ -36,7 +33,7 @@ function uid(req, res) {
   return id;
 }
 
-/** Analyze + attach metadata + write the memory fact — shared by fresh
+/** Analyze + attach metadata — shared by fresh
  *  uploads and the lazy healing pass below. Never throws. */
 async function analyzeInBackground(userId, row, buffer, mime) {
   try {
@@ -67,7 +64,6 @@ const healAttempted = new Set();
 
 router.post(
   "/",
-  billing.enforceDocUpload((uid) => docs.countDocuments(uid)),  // countDocuments is async; enforceDocUpload awaits it
   upload.single("file"),
   async (req, res) => {
   const id = uid(req, res);

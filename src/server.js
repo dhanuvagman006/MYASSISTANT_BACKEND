@@ -51,7 +51,6 @@ app.use(
     normalizePath: [
       ["^/docs/\\d+.*", "/docs/#id"],
       ["^/reminders/\\d+", "/reminders/#id"],
-      ["^/memory/\\d+", "/memory/#id"],
       ["^/agent-call/plivo/[^/]+/", "/agent-call/plivo/#id/"],
       ["^/agent-call/[a-f0-9]{16,}", "/agent-call/#id"],
     ],
@@ -62,7 +61,6 @@ app.use(
     limit: "2mb",
     // Razorpay signs the RAW bytes — keep them for webhook verification.
     verify: (req, _res, buf) => {
-      if (req.originalUrl === "/billing/webhook") req.rawBody = buf;
     },
   })
 );
@@ -85,16 +83,6 @@ app.use(
   authRoute
 );
 
-// BILLING — plans, Razorpay checkout + webhook, families. The webhook
-// is server-to-server from Razorpay (no app JWT) and is verified by
-// X-Razorpay-Signature inside the route instead.
-const billing = require("./billing/routes");
-app.use(
-  "/billing",
-  (req, res, next) => (req.path === "/webhook" ? next() : appAuth(req, res, next)),
-  billing.router
-);
-
 // PER-USER rate limit (on top of the per-IP one): a single hot account
 // can't drain the AI quota for everyone behind the same NAT/proxy.
 const perUserLimit = rateLimit({
@@ -106,10 +94,8 @@ const perUserLimit = rateLimit({
 
 // Chat requires the app key so strangers can't burn your AI credits.
 // Order: authenticate → per-user throttle → plan allowance → handler.
-app.use("/chat", appAuth, perUserLimit, billing.enforce("chat"), chatRoute);
+app.use("/chat", appAuth, perUserLimit, chatRoute);
 
-// Per-user memory management (list / add / forget) for the privacy screen.
-app.use("/memory", appAuth, require("./routes/memory"));
 
 // Phase 1 / ADR-004 — the user-visible audit trail of assistant actions.
 app.use("/actions", appAuth, require("./routes/actions"));
@@ -120,37 +106,9 @@ app.use("/privacy", appAuth, require("./routes/privacy"));
 // Google account link: Gmail + Calendar (read-only).
 app.use("/google", appAuth, require("./google/routes"));
 
-// MEETING COPILOT — transcript → decisions / actions / follow-up draft
-app.use("/meetings", appAuth, require("./meetings/routes"));
-
-// Swiggy account link (Builders Club MCP food ordering).
-// The OAuth callback is reached by a BROWSER redirect (no app JWT), so it
-// is mounted before the auth guard; identity rides on the signed state.
-const swiggyRoutes = require("./swiggy/routes");
-app.use(
-  "/swiggy",
-  (req, res, next) => (req.path === "/callback" ? next() : appAuth(req, res, next)),
-  swiggyRoutes
-);
 
 // Reminders (voice-created via /chat intents + Today screen CRUD).
 app.use("/reminders", appAuth, require("./reminders/routes"));
-
-// AGENT CALLS — "call Allen and ask when he'll be home": the backend
-// dials via PLIVO (India-capable: real +91 numbers + domestic routing
-// once KYC'd) and the AI TALKS on the call, then the app speaks the
-// answer back. Plivo's webhooks arrive WITHOUT an app JWT — they are
-// authenticated per-request by X-Plivo-Signature-V2 inside the route.
-app.use(
-  "/agent-call",
-  (req, res, next) =>
-    req.path.startsWith("/plivo/") ? next() : appAuth(req, res, next),
-  (req, res, next) =>
-    req.method === "POST" && req.path === "/"
-      ? billing.enforceAgentCall(req, res, next)
-      : next(),
-  require("./agentcall/routes")
-);
 
 // ADMIN — read-only ops stats behind a static key (set ADMIN_KEY).
 app.use("/admin", require("./routes/admin"));
@@ -179,30 +137,11 @@ app.get("/tools/news", appAuth, async (req, res) => {
   }
 });
 
-// ASSISTANT — the interactive voice-assistant experience: one SSE stream
-// per app session carries live states (listening → thinking → searching →
-// dialing…), transcripts, search cards, contact/call events. The stream
-// (/stream/:id) and generated audio (/audio/:id) are reached WITHOUT the
-// app JWT — EventSource can't send headers and Plivo fetches the audio —
-// each is protected by its own signed/unguessable token inside the route.
-app.use(
-  "/assistant",
-  (req, res, next) =>
-    req.path.startsWith("/stream/") || req.path.startsWith("/audio/")
-      ? next()
-      : appAuth(req, res, next),
-  (req, res, next) =>
-    req.path.startsWith("/stream/") || req.path.startsWith("/audio/")
-      ? next()
-      : perUserLimit(req, res, next),
-  require("./assistant/routes")
-);
-
 // Voice transcription (Gemini) — same auth as chat
-app.use("/stt", appAuth, perUserLimit, billing.enforce("stt"), sttRoute);
+app.use("/stt", appAuth, perUserLimit, sttRoute);
 
 // Group B — photos, documents, OCR, screenshot helper (Gemini vision).
-app.use("/vision", appAuth, perUserLimit, billing.enforce("vision"), require("./routes/vision"));
+app.use("/vision", appAuth, perUserLimit, require("./routes/vision"));
 
 // Group B+ — SAVED documents: hospital reports, receipts… Hari remembers
 // them and pulls them back up from a voice request (see routes/docs.js).
@@ -213,21 +152,6 @@ app.use("/places", appAuth, require("./routes/places"));
 
 // Regional language from the caller's IP (no app permissions needed)
 app.use("/region", regionRoute);
-
-// D-ID FACE MODE + VIDEO BRIEFINGS (docs.d-id.com):
-//  - /did/llm/*  — called BY D-ID's servers (custom-LLM contract); it
-//                  authenticates itself with x-api-key = DID_LLM_KEY, so
-//                  no app JWT here.
-//  - /did/face   — loaded by the app's WebView via a signed query token
-//                  minted by POST /did/session; a browser page can't
-//                  attach our Authorization header, the token IS the auth.
-//  - everything else under /did requires the normal app JWT.
-app.use("/did/llm", require("./did/compat"));
-app.use(
-  "/did",
-  (req, res, next) => (req.path === "/face" ? next() : appAuth(req, res, next)),
-  require("./did/routes")
-);
 
 // JSON 404 for unmatched routes (instead of Express's default HTML page)
 app.use((_req, res) => res.status(404).json({ error: "not found" }));
