@@ -41,7 +41,7 @@ const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 // ---------------- EMAIL ----------------
 
 router.post("/signup", async (req, res) => {
-  const { email, password, name } = req.body || {};
+  const { email, password, name, gender } = req.body || {};
   if (!EMAIL_RE.test(email || "")) {
     return res.status(400).json({ error: "valid email required" });
   }
@@ -56,6 +56,7 @@ router.post("/signup", async (req, res) => {
     name: typeof name === "string" ? name.trim().slice(0, 100) : null,
     passwordHash: await bcrypt.hash(password, 10),
     provider: "email",
+    gender: db.cleanGender(gender),
   });
   // First memories: whatever the user gave us at sign-up.
   await memory.seedProfile(user.id, { name: user.name, email: user.email });
@@ -130,6 +131,23 @@ router.post("/apple", async (req, res) => {
 });
 
 // ---------------- SESSION ----------------
+
+router.patch("/me", async (req, res) => {
+  const authz = req.get("Authorization") || "";
+  if (!authz.startsWith("Bearer ")) return res.status(401).json({ error: "token required" });
+  try {
+    const { uid } = jwt.verify(authz.slice(7), JWT_SECRET);
+    const { gender } = req.body || {};
+    if (gender !== undefined && db.cleanGender(gender) === null && gender !== null) {
+      return res.status(400).json({ error: "gender must be male, female or other" });
+    }
+    const user = await db.setGender(uid, gender);
+    if (!user) return res.status(401).json({ error: "account not found" });
+    res.json({ user: db.publicUser(user) });
+  } catch (_) {
+    res.status(401).json({ error: "invalid or expired session" });
+  }
+});
 
 router.get("/me", async (req, res) => {
   const authz = req.get("Authorization") || "";

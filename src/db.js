@@ -67,8 +67,12 @@ async function init() {
       provider      TEXT NOT NULL DEFAULT 'email',  -- email | google | apple
       provider_sub  TEXT,                            -- Google/Apple stable user id
       created_at    BIGINT NOT NULL,
+      gender        TEXT,   -- 'male' | 'female' | 'other' | NULL (unset)
       UNIQUE(provider, provider_sub)
     );
+
+    -- Migration for databases created before the gender column existed.
+    ALTER TABLE users ADD COLUMN IF NOT EXISTS gender TEXT;
 
     -- AUDIT LOG (Phase 1 / ADR-004): one row for every action the assistant
     -- performs on the user's behalf that touches the outside world or
@@ -249,12 +253,25 @@ async function findByProvider(provider, sub) {
   return one("SELECT * FROM users WHERE provider = $1 AND provider_sub = $2", [provider, sub]);
 }
 
-async function createUser({ email, name, passwordHash = null, provider = "email", providerSub = null }) {
+async function createUser({ email, name, passwordHash = null, provider = "email", providerSub = null, gender = null }) {
   return one(
-    `INSERT INTO users (email, name, password_hash, provider, provider_sub, created_at)
-     VALUES ($1, $2, $3, $4, $5, $6) RETURNING *`,
-    [email ? email.toLowerCase() : null, name || null, passwordHash, provider, providerSub, Date.now()]
+    `INSERT INTO users (email, name, password_hash, provider, provider_sub, created_at, gender)
+     VALUES ($1, $2, $3, $4, $5, $6, $7) RETURNING *`,
+    [email ? email.toLowerCase() : null, name || null, passwordHash, provider, providerSub, Date.now(), gender]
   );
+}
+
+const GENDERS = new Set(["male", "female", "other"]);
+
+/** Normalize a client-supplied gender; anything unknown becomes null. */
+function cleanGender(g) {
+  const v = typeof g === "string" ? g.trim().toLowerCase() : "";
+  return GENDERS.has(v) ? v : null;
+}
+
+async function setGender(userId, gender) {
+  await run("UPDATE users SET gender = $1 WHERE id = $2", [cleanGender(gender), Number(userId)]);
+  return findById(userId);
 }
 
 /** Find-or-create for social sign-in. Links by provider sub first, then email.
@@ -286,10 +303,11 @@ async function upsertSocialUser({ provider, sub, email, name }) {
 
 /** Shape sent to clients — never includes password_hash. */
 function publicUser(u) {
-  return { id: u.id, email: u.email, name: u.name, provider: u.provider };
+  return { id: u.id, email: u.email, name: u.name, provider: u.provider, gender: u.gender || null };
 }
 
 module.exports = {
   pool, query, one, run, tx, init, close,
   findByEmail, findById, upsertSocialUser, createUser, publicUser,
+  cleanGender, setGender,
 };
