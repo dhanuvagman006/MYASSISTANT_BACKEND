@@ -1,11 +1,7 @@
 /**
- * SPEECH-TO-TEXT — provider chain, best-for-India first:
- *
- *   1. SARVAM "Saaras v3" (SARVAM_API_KEY, optional) — built specifically
- *      for Indian languages, accents and code-mixed speech.
- *   2. GEMINI (GEMINI_API_KEY) — audio is a first-class input to
- *      gemini-2.0-flash; one key now powers the WHOLE voice loop
- *      (STT + chat + streaming). Replaces the old Groq Whisper path.
+ * SPEECH-TO-TEXT — GEMINI ONLY. Audio is a first-class input to
+ * gemini-2.0-flash; the same GEMINI_API_KEY powers the whole voice loop
+ * (STT + chat + streaming).
  *
  * POST /stt (multipart "audio") -> { text, language }
  */
@@ -44,57 +40,12 @@ function sanitizeTranscript(raw) {
   return t;
 }
 
-// ---------------- SARVAM (Saaras v3) ----------------
-
-// ISO-639-1 → Sarvam BCP-47. Only languages Saaras supports; anything
-// else falls back to auto-detect ("unknown").
-const SARVAM_LANG = {
-  hi: "hi-IN", bn: "bn-IN", kn: "kn-IN", ml: "ml-IN", mr: "mr-IN",
-  or: "od-IN", pa: "pa-IN", ta: "ta-IN", te: "te-IN", en: "en-IN",
-  gu: "gu-IN", as: "as-IN", ur: "ur-IN", ne: "ne-IN", sa: "sa-IN",
-};
-
-async function sarvamTranscribe(key, file, { language, hint } = {}) {
-  const fd = new FormData();
-  fd.append(
-    "file",
-    new Blob([file.buffer], { type: file.mimetype || "audio/m4a" }),
-    file.originalname || "audio.m4a"
-  );
-  fd.append("model", process.env.SARVAM_STT_MODEL || "saaras:v3");
-  fd.append("mode", "transcribe");
-  // Forced language locks it; a hint also locks here (Saaras has no
-  // soft-bias parameter) but its Indic auto-detect is strong enough
-  // that we only lock on the USER'S explicit pick, not the region hint.
-  if (language && SARVAM_LANG[language]) {
-    fd.append("language_code", SARVAM_LANG[language]);
-  } else {
-    fd.append("language_code", "unknown"); // auto-detect (its specialty)
-  }
-
-  const r = await fetch("https://api.sarvam.ai/speech-to-text", {
-    method: "POST",
-    headers: { "api-subscription-key": key },
-    body: fd,
-    signal: AbortSignal.timeout(30_000),
-  });
-  if (!r.ok) {
-    const body = await r.text().catch(() => "");
-    throw new Error(`sarvam ${r.status} ${body.slice(0, 200)}`);
-  }
-  const data = await r.json();
-  return {
-    text: (data.transcript || "").trim(),
-    language: (data.language_code || "unknown").split("-")[0],
-  };
-}
-
 // ---------------- GEMINI ----------------
 
 const { transcribeAudio } = require("../services/ai/router");
 
 router.post("/", upload.single("audio"), async (req, res) => {
-  if (!process.env.GEMINI_API_KEY && !process.env.SARVAM_API_KEY) {
+  if (!process.env.GEMINI_API_KEY) {
     return res.status(503).json({ error: "stt not configured" });
   }
   if (!req.file || !req.file.buffer?.length) {
@@ -107,23 +58,6 @@ router.post("/", upload.single("audio"), async (req, res) => {
   const language = clean(req.body?.language);
   const hint = clean(req.body?.hint);
 
-  // ---- 1) Sarvam: Indian-accent specialist (only if its key is set) ----
-  const sarvamKey = process.env.SARVAM_API_KEY;
-  if (sarvamKey) {
-    try {
-      const out = await sarvamTranscribe(sarvamKey, req.file, { language, hint });
-      out.text = sanitizeTranscript(out.text);
-      if (out.text) return res.json({ ...out, provider: "sarvam" });
-      // Empty transcript: fall through to Gemini.
-    } catch (e) {
-      console.warn("sarvam stt failed, falling back:", e.message);
-    }
-  }
-
-  // ---- 2) Gemini ----
-  if (!process.env.GEMINI_API_KEY) {
-    return res.status(502).json({ error: "transcription failed" });
-  }
   try {
     const out = await transcribeAudio(
       req.file.buffer,

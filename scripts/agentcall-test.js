@@ -13,7 +13,7 @@ process.env.AUTH_DISABLED = "true";
 process.env.DATA_DIR = "/tmp/agentcall-test-" + Date.now();
 // PORT is assigned dynamically in main() via scripts/_free-port.js
 process.env.PLIVO_VALIDATE = "false";
-delete process.env.GROQ_API_KEY;
+
 delete process.env.GEMINI_API_KEY;
 delete process.env.PLIVO_AUTH_ID; // start UNconfigured for the 503 test
 

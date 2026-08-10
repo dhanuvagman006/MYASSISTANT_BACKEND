@@ -42,7 +42,7 @@ async function main() {
       DATA_DIR: dataDir,
       JWT_SECRET: "smoke-test-secret-smoke-test-secret-123",
       AUTH_DISABLED: "false", // a local dev .env must never break the suite
-      GROQ_API_KEY: "", GEMINI_API_KEY: "", SARVAM_API_KEY: "",
+      GEMINI_API_KEY: "", SARVAM_API_KEY: "",
     },
     stdio: ["ignore", "pipe", "pipe"],
   });

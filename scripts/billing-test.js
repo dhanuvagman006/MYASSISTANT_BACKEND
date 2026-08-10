@@ -15,7 +15,7 @@ process.env.RAZORPAY_KEY_ID = "rzp_test_x";
 process.env.RAZORPAY_KEY_SECRET = "secret";
 process.env.RAZORPAY_WEBHOOK_SECRET = "whsec_test";
 process.env.ADMIN_KEY = "admin-key-16-chars-min";
-delete process.env.GROQ_API_KEY;
+
 delete process.env.GEMINI_API_KEY;
 
 const assert = require("assert");

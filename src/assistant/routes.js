@@ -112,33 +112,7 @@ router.post("/:id/message", (req, res) => {
     .catch((e) => console.error("assistant message error:", e));
 });
 
-// ---------------- STT: Deepgram Nova-2 (optional) -> Gemini fallback ----------------
-
-async function deepgramTranscribe(file) {
-  const key = process.env.DEEPGRAM_API_KEY;
-  if (!key) return null;
-  const u = new URL("https://api.deepgram.com/v1/listen");
-  u.searchParams.set("model", process.env.DEEPGRAM_MODEL || "nova-2");
-  u.searchParams.set("smart_format", "true");
-  u.searchParams.set("detect_language", "true");
-  const r = await fetch(u, {
-    method: "POST",
-    headers: {
-      Authorization: `Token ${key}`,
-      "Content-Type": file.mimetype || "audio/m4a",
-    },
-    signal: AbortSignal.timeout(30_000),
-    body: file.buffer,
-  });
-  if (!r.ok) throw new Error(`deepgram ${r.status}`);
-  const data = await r.json();
-  const alt = data.results?.channels?.[0]?.alternatives?.[0];
-  return {
-    text: String(alt?.transcript || "").trim(),
-    language: data.results?.channels?.[0]?.detected_language || "en",
-    provider: "deepgram",
-  };
-}
+// ---------------- STT: Gemini ----------------
 
 async function geminiTranscribe(file) {
   if (!process.env.GEMINI_API_KEY) return null;
@@ -157,7 +131,7 @@ router.post("/:id/audio", upload.single("audio"), async (req, res) => {
 
   s.setState("transcribing");
   let out = null;
-  for (const fn of [deepgramTranscribe, geminiTranscribe]) {
+  for (const fn of [geminiTranscribe]) {
     try {
       out = await fn(req.file);
       if (out) break;

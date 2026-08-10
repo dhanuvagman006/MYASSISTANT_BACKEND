@@ -13,7 +13,7 @@ process.env.JWT_SECRET = "x".repeat(48);
 process.env.AUTH_DISABLED = "false";
 process.env.APP_API_KEY = "";
 process.env.DATA_DIR = "/tmp/audit-test-" + Date.now();
-delete process.env.GROQ_API_KEY;
+
 delete process.env.GEMINI_API_KEY;
 
 const assert = require("assert");

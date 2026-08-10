@@ -13,7 +13,7 @@ process.env.AUTH_DISABLED = "false";
 process.env.APP_API_KEY = "";
 process.env.DATA_DIR = "/tmp/features-test-" + Date.now();
 // PORT is assigned dynamically in main() via scripts/_free-port.js
-delete process.env.GROQ_API_KEY;
+
 delete process.env.GEMINI_API_KEY;
 delete process.env.PLIVO_AUTH_ID;
 
