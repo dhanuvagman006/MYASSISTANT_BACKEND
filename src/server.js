@@ -96,6 +96,15 @@ const perUserLimit = rateLimit({
 // Order: authenticate → per-user throttle → plan allowance → handler.
 app.use("/chat", appAuth, perUserLimit, chatRoute);
 
+// ASSISTANT — the realtime voice-loop module the app's home screen uses
+// (session + SSE event stream + mic-clip turns). The SSE stream route
+// authenticates with a per-session random token (?token=…) because
+// EventSource clients can't attach an Authorization header; every other
+// assistant route sits behind the normal appAuth like /chat does.
+const assistantRoutes = require("./assistant/routes");
+app.get("/assistant/stream/:sid", assistantRoutes.streamHandler);
+app.use("/assistant", appAuth, perUserLimit, assistantRoutes);
+
 
 // Phase 1 / ADR-004 — the user-visible audit trail of assistant actions.
 app.use("/actions", appAuth, require("./routes/actions"));
