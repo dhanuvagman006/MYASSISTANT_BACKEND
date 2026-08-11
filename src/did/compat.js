@@ -23,9 +23,12 @@
 const router = require("express").Router();
 const jwt = require("jsonwebtoken");
 const { generateReply, generateReplyStream } = require("../services/ai/router");
-// Memory module was removed in the core reset; face replies run on the
-// base persona + live tool context only.
+// The photoreal face runs on the SAME personalized persona as the voice
+// loop: user's name + everything the memory store has learned. One
+// continuous person across the home screen and Face Mode.
 const { buildToolContext } = require("../services/intents");
+const { personaBlock } = require("../agents/conversationAgent");
+const { extractAndStore } = require("../agents/memory");
 
 const INTERVIEW_DIRECTIVE =
   "\n\nMODE: FIRST-MEETING INTERVIEW. This is your very first conversation with " +
@@ -105,9 +108,15 @@ router.post("/v1/chat/completions", verifyDid, async (req, res) => {
       messages: trimmed,
       tzOffsetMin: 330, // face sessions have no device headers; IST default
     });
+    const persona = await personaBlock(userId).catch(() => "");
     const extraSystem =
+      persona +
       toolCtx.block +
       (mode === "interview" ? INTERVIEW_DIRECTIVE : FACE_DIRECTIVE);
+    // The interview and every face chat also TEACH the memory —
+    // "my name is Dhanya" said to the face is remembered by the voice.
+    const lastUser = [...trimmed].reverse().find((m) => m.role === "user");
+    if (lastUser) extractAndStore(userId, lastUser.content);
 
     let full = "";
     if (stream !== false) {

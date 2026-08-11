@@ -98,6 +98,38 @@ async function init() {
     );
     CREATE INDEX IF NOT EXISTS idx_reminders_user ON reminders(user_id, done, due_at);
 
+    -- AGENT MEMORY (multi-agent phase): durable per-user facts the
+    -- conversational agent has learned ("name is Dhanya", "vegetarian",
+    -- "exam on the 20th"). Injected into every agent's prompt AND the
+    -- D-ID face bridge — the assistant is one continuous person.
+    -- Wiped by account deletion; exported by /privacy/export.
+    CREATE TABLE IF NOT EXISTS agent_memories (
+      id         BIGSERIAL PRIMARY KEY,
+      user_id    INTEGER NOT NULL,
+      fact       TEXT NOT NULL,
+      importance INTEGER NOT NULL DEFAULT 2,   -- 3 identity/health, 2 prefs, 1 minor
+      created_at BIGINT NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS idx_memories_user
+      ON agent_memories(user_id, importance DESC, id DESC);
+
+    -- BOOKINGS (booking agent): the user's booking ledger. A reminder
+    -- row is created one hour before when_at. status: confirmed|cancelled.
+    CREATE TABLE IF NOT EXISTS bookings (
+      id         BIGSERIAL PRIMARY KEY,
+      user_id    INTEGER NOT NULL,
+      kind       TEXT NOT NULL DEFAULT 'other', -- restaurant|doctor|travel|salon|other
+      title      TEXT NOT NULL,
+      venue      TEXT,
+      party_size INTEGER,
+      when_at    BIGINT,                        -- epoch ms; NULL = undated
+      notes      TEXT,
+      status     TEXT NOT NULL DEFAULT 'confirmed',
+      created_at BIGINT NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS idx_bookings_user
+      ON bookings(user_id, status, when_at);
+
     CREATE TABLE IF NOT EXISTS google_tokens (
       user_id       INTEGER PRIMARY KEY,
       refresh_token TEXT NOT NULL,

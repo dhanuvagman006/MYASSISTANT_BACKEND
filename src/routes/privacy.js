@@ -32,6 +32,8 @@ const USER_TABLES = [
   ["reminders", "user_id"],
   ["documents", "user_id"],
   ["google_tokens", "user_id"],
+  ["agent_memories", "user_id"], // everything the assistant remembers
+  ["bookings", "user_id"], // the booking agent's ledger
 ];
 
 async function existingUserTables() {

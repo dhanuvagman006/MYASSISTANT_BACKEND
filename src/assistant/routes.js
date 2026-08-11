@@ -32,11 +32,9 @@ const router = require("express").Router();
 const crypto = require("crypto");
 const multer = require("multer");
 
-const {
-  generateReply,
-  transcribeAudio,
-} = require("../services/ai/router");
+const { transcribeAudio } = require("../services/ai/router");
 const { buildToolContext } = require("../services/intents");
+const { runAgentTurn } = require("../agents/orchestrator");
 
 const upload = multer({
   storage: multer.memoryStorage(),
@@ -202,28 +200,44 @@ async function runTurn(s, req, userText) {
 
     // Same tool layer the /chat route uses — reminders, weather, news,
     // documents… so the voice assistant knows everything chat knows.
-    let extraSystem = "";
-    let toolCtx = null;
+    let toolBlock = "";
     try {
-      toolCtx = await buildToolContext({
+      const toolCtx = await buildToolContext({
         userId: Number(s.userSub) > 0 ? Number(s.userSub) : null,
         messages: s.history,
         tzOffsetMin: Number(req.get("X-TZ-Offset")) || 330,
         lat: parseFloat(req.get("X-Geo-Lat")),
         lng: parseFloat(req.get("X-Geo-Lng")),
       });
-      extraSystem = toolCtx.block || "";
-      for (const src of toolCtx.sources || []) {
-        emit(s, { type: "tool_started", tool: src, label: `Using ${src}…` });
-        emit(s, { type: "tool_completed", tool: src });
-      }
+      toolBlock = toolCtx.block || "";
     } catch (_) {}
 
     if (s.cancelled) return;
-    const { reply } = await generateReply(s.history, { extraSystem });
+
+    // MULTI-AGENT: booking / search specialists claim their turns; all
+    // else goes to the personalized conversation agent. The app shows
+    // which agent is working via the tool cards.
+    const turn = await runAgentTurn({
+      text: userText,
+      history: s.history,
+      userId: Number(s.userSub) > 0 ? Number(s.userSub) : null,
+      tzOffsetMin: Number(req.get("X-TZ-Offset")) || 330,
+      lat: parseFloat(req.get("X-Geo-Lat")),
+      lng: parseFloat(req.get("X-Geo-Lng")),
+      toolBlock,
+    });
     if (s.cancelled) return;
 
-    const text = reply || "Sorry, I couldn't answer that.";
+    for (const u of turn.used) {
+      emit(s, {
+        type: "tool_started",
+        tool: u.tool,
+        label: `${turn.agentLabel} · ${u.label}`,
+      });
+      emit(s, { type: "tool_completed", tool: u.tool });
+    }
+
+    const text = turn.text || "Sorry, I couldn't answer that.";
     s.history.push({ role: "assistant", content: text });
 
     state(s, "speaking"); // the app's TTS + avatar mouth run on this
