@@ -104,7 +104,7 @@ router.post("/", receiveFile, async (req, res) => {
       }
     } catch (_) {}
 
-    const model = process.env.GEMINI_VISION_MODEL || "gemini-2.0-flash";
+    const model = process.env.GEMINI_VISION_MODEL || "gemini-2.5-flash";
     const r = await fetch(
       `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent`,
       {

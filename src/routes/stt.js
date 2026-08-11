@@ -1,6 +1,6 @@
 /**
  * SPEECH-TO-TEXT — GEMINI ONLY. Audio is a first-class input to
- * gemini-2.0-flash; the same GEMINI_API_KEY powers the whole voice loop
+ * gemini-2.5-flash; the same GEMINI_API_KEY powers the whole voice loop
  * (STT + chat + streaming).
  *
  * POST /stt (multipart "audio") -> { text, language }

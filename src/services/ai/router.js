@@ -1,7 +1,7 @@
 /**
  * AI PROVIDER ROUTER — GEMINI ONLY
  * --------------------------------
- * Single provider: Google Gemini (gemini-2.0-flash by default).
+ * Single provider: Google Gemini (gemini-2.5-flash by default).
  * Handles chat (generateReply), voice streaming (generateReplyStream via
  * streamGenerateContent SSE) and audio transcription (transcribeAudio).
  *
@@ -58,7 +58,7 @@ const TIMEOUT_MS = 30_000;
 async function callGemini(messages, system = SYSTEM_PROMPT) {
   const key = process.env.GEMINI_API_KEY;
   if (!key) throw new Error("gemini: key missing");
-  const model = process.env.GEMINI_MODEL || "gemini-2.0-flash";
+  const model = process.env.GEMINI_MODEL || "gemini-2.5-flash";
 
   // Key goes in a header, never the URL — URLs end up in proxy/server logs.
   const r = await fetch(
@@ -129,7 +129,7 @@ async function generateReply(messages, opts = {}) {
 async function* generateReplyStream(messages, opts = {}) {
   const key = requireKey();
   const system = opts.system || SYSTEM_PROMPT + (opts.extraSystem || "");
-  const model = process.env.GEMINI_MODEL || "gemini-2.0-flash";
+  const model = process.env.GEMINI_MODEL || "gemini-2.5-flash";
 
   const r = await fetch(
     `https://generativelanguage.googleapis.com/v1beta/models/${model}:streamGenerateContent?alt=sse`,
@@ -184,7 +184,7 @@ async function* generateReplyStream(messages, opts = {}) {
 
 /**
  * AUDIO TRANSCRIPTION via Gemini (audio is a first-class input to
- * gemini-2.0-flash). Replaces the old Groq Whisper dependency so the
+ * gemini-2.5-flash). Replaces the old Groq Whisper dependency so the
  * whole voice loop runs on a single provider/key.
  * @param {Buffer} buffer  raw audio bytes (m4a/aac from the app)
  * @param {string} mimeType e.g. "audio/mp4"
@@ -193,7 +193,7 @@ async function* generateReplyStream(messages, opts = {}) {
  */
 async function transcribeAudio(buffer, mimeType, opts = {}) {
   const key = requireKey();
-  const model = process.env.GEMINI_MODEL || "gemini-2.0-flash";
+  const model = process.env.GEMINI_MODEL || "gemini-2.5-flash";
   // The app records .m4a (AAC in an MP4 container). Normalize the label,
   // and keep a fallback: some Gemini deployments accept audio/mp4 but not
   // audio/aac, others the reverse — a 4xx triggers ONE retry with the

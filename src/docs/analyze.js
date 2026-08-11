@@ -3,7 +3,7 @@
  * Runs ONCE at upload time; every later recall is a pure DB lookup,
  * so remembering costs one AI call ever, not one per question.
  */
-const MODEL = () => process.env.GEMINI_VISION_MODEL || "gemini-2.0-flash";
+const MODEL = () => process.env.GEMINI_VISION_MODEL || "gemini-2.5-flash";
 
 const PROMPT = `You are filing a document into a personal assistant's memory.
 Look at the attached file and reply with STRICT JSON only (no markdown fences):

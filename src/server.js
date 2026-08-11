@@ -147,6 +147,21 @@ app.use("/vision", appAuth, perUserLimit, require("./routes/vision"));
 // them and pulls them back up from a voice request (see routes/docs.js).
 app.use("/docs", appAuth, require("./routes/docs"));
 
+// D-ID FACE MODE + VIDEO BRIEFINGS (docs.d-id.com):
+//  - /did/llm/*  — called BY D-ID's servers (custom-LLM contract); it
+//                  authenticates itself with x-api-key = DID_LLM_KEY, so
+//                  no app JWT here.
+//  - /did/face   — loaded by the app's WebView via a signed query token
+//                  minted by POST /did/session; a browser page can't
+//                  attach our Authorization header, the token IS the auth.
+//  - everything else under /did requires the normal app JWT.
+app.use("/did/llm", require("./did/compat"));
+app.use(
+  "/did",
+  (req, res, next) => (req.path === "/face" ? next() : appAuth(req, res, next)),
+  require("./did/routes")
+);
+
 // Group C — nearby places search (ratings, distance, call & directions).
 app.use("/places", appAuth, require("./routes/places"));
 
