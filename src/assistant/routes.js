@@ -214,10 +214,13 @@ async function runTurn(s, req, userText) {
 
     if (s.cancelled) return;
 
-    // MULTI-AGENT: booking / search specialists claim their turns; all
-    // else goes to the personalized conversation agent. The app shows
-    // which agent is working via the tool cards.
-    const turn = await runAgentTurn({
+    // MULTI-AGENT routing. CONVERSATION turns stream sentence-by-
+    // sentence (the app starts speaking sentence 1 while sentence 2 is
+    // still generating — real-conversation latency). Specialist turns
+    // (booking/search) do their tool work then reply whole, as before.
+    const { route } = require("../agents/orchestrator");
+    const agent = route(userText);
+    const turnInput = {
       text: userText,
       history: s.history,
       userId: Number(s.userSub) > 0 ? Number(s.userSub) : null,
@@ -225,7 +228,32 @@ async function runTurn(s, req, userText) {
       lat: parseFloat(req.get("X-Geo-Lat")),
       lng: parseFloat(req.get("X-Geo-Lng")),
       toolBlock,
-    });
+    };
+
+    let text;
+    if (agent.name === "conversation") {
+      const conversationAgent = require("../agents/conversationAgent");
+      let firstSentence = true;
+      const out = await conversationAgent.handleStream(turnInput, (sentence) => {
+        if (s.cancelled) return;
+        if (firstSentence) {
+          firstSentence = false;
+          state(s, "speaking"); // TTS starts NOW, not after the full reply
+        }
+        emit(s, { type: "assistant_sentence", text: sentence });
+      });
+      text = out.text || "Sorry, I couldn't answer that.";
+      if (s.cancelled) return;
+      s.history.push({ role: "assistant", content: text });
+      // Final full text for the transcript; streamed:true tells the app
+      // it has already spoken the sentences — display only, no re-speak.
+      emit(s, { type: "assistant_message", text, streamed: true });
+      state(s, "completed");
+      s.busy = false;
+      return;
+    }
+
+    const turn = await runAgentTurn(turnInput);
     if (s.cancelled) return;
 
     for (const u of turn.used) {
@@ -237,7 +265,7 @@ async function runTurn(s, req, userText) {
       emit(s, { type: "tool_completed", tool: u.tool });
     }
 
-    const text = turn.text || "Sorry, I couldn't answer that.";
+    text = turn.text || "Sorry, I couldn't answer that.";
     s.history.push({ role: "assistant", content: text });
 
     state(s, "speaking"); // the app's TTS + avatar mouth run on this

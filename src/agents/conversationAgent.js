@@ -13,7 +13,7 @@
  * and TTS constraints; this adds the humanity on top.)
  */
 const { one } = require("../db");
-const { generateReply } = require("../services/ai/router");
+const { generateReply, generateReplyStream } = require("../services/ai/router");
 const memory = require("./memory");
 
 const HUMAN_DIRECTIVE =
@@ -67,4 +67,59 @@ async function handle(turn) {
   return { text: reply || "Sorry, say that once more?", used: [] };
 }
 
-module.exports = { handle, personaBlock };
+/**
+ * STREAMING variant — the latency path. Yields COMPLETE SENTENCES the
+ * moment each one finishes generating, so the app starts speaking the
+ * first sentence while the rest of the reply is still being written.
+ * That cuts perceived response time from "whole reply" to "first
+ * sentence" — the single biggest step toward real-conversation speed.
+ *
+ * @param {{history:Array, userId:number|null, toolBlock:string, styleBlock:string}} turn
+ * @param {(sentence:string)=>void} onSentence called per finished sentence, in order
+ * @returns {Promise<{text:string, used:Array}>} the full reply
+ */
+async function handleStream(turn, onSentence) {
+  const { history, userId, toolBlock = "", styleBlock = "" } = turn;
+  const extraSystem = (await personaBlock(userId)) + toolBlock + styleBlock;
+
+  let full = "";
+  let pending = "";
+  // Sentence enders across languages this assistant speaks:
+  // . ! ? and the Devanagari danda । (Hindi/Marathi).
+  const flushComplete = () => {
+    const m = pending.match(/^[\s\S]*?[.!?।](?=\s|$)/);
+    if (!m) return;
+    const sentence = m[0].trim();
+    pending = pending.slice(m[0].length).replace(/^\s+/, "");
+    if (sentence) onSentence(sentence);
+  };
+
+  try {
+    for await (const d of generateReplyStream(history, { extraSystem })) {
+      full += d;
+      pending += d;
+      // Flush every completed sentence in the buffer.
+      let before;
+      do {
+        before = pending;
+        flushComplete();
+      } while (pending !== before);
+    }
+  } catch (e) {
+    // Stream failed before/while producing — fall back to non-streaming
+    // so the turn NEVER dies just because streaming hiccuped.
+    if (!full) {
+      const out = await handle(turn);
+      return out;
+    }
+  }
+  const tail = pending.trim();
+  if (tail) onSentence(tail);
+
+  const lastUser = [...history].reverse().find((m) => m.role === "user");
+  if (lastUser) memory.extractAndStore(userId, lastUser.content);
+
+  return { text: full.trim() || "Sorry, say that once more?", used: [] };
+}
+
+module.exports = { handle, handleStream, personaBlock };

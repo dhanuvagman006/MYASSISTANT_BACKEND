@@ -123,6 +123,9 @@ app.use("/assistant", appAuth, perUserLimit, assistantRoutes);
 // Onboarding survey + profile view (feeds users table + agent memory).
 app.use("/profile", appAuth, require("./routes/profile"));
 
+// Real-time human avatar (Tavus CVI) — hidden until TAVUS_* env is set.
+app.use("/avatar", appAuth, require("./avatar/tavus"));
+
 
 // Phase 1 / ADR-004 — the user-visible audit trail of assistant actions.
 app.use("/actions", appAuth, require("./routes/actions"));
