@@ -4,9 +4,7 @@
  *
  * Personal: her system prompt is assembled PER USER, per turn — the
  * user's name and gender from the account, plus everything the memory
- * store has learned across conversations. The same personalization
- * block feeds the D-ID photoreal face (did/compat.js), so the voice on
- * the home screen and the face in Face Mode are one continuous person.
+ * store has learned across conversations.
  *
  * Human: layered speaking directives make replies sound like a person
  * on a call — contractions, small reactions, one thought at a time,
