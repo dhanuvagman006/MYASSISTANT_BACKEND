@@ -27,6 +27,21 @@ const app = express();
 app.set("trust proxy", 1);
 app.use(helmet());
 
+// CORS — native mobile apps don't enforce it, but web-origin callers do:
+// the D-ID hosted face page's JS, any future web client, and local dev
+// tools. Permissive-by-default is safe here because real protection is
+// the auth layer (JWT / app key), not the origin.
+app.use((req, res, next) => {
+  res.setHeader("Access-Control-Allow-Origin", process.env.CORS_ORIGIN || "*");
+  res.setHeader(
+    "Access-Control-Allow-Headers",
+    "Content-Type, Authorization, X-App-Key, X-TZ-Offset, X-Geo-Lat, X-Geo-Lng, X-Style-Tone, X-Style-Length, Last-Event-ID"
+  );
+  res.setHeader("Access-Control-Allow-Methods", "GET, POST, PATCH, DELETE, OPTIONS");
+  if (req.method === "OPTIONS") return res.sendStatus(204);
+  next();
+});
+
 // ---- METRICS (/metrics, Prometheus format) ----
 // Powers the external monitoring VPS: request rate, latency histograms,
 // status codes per route, plus Node process/heap defaults.
@@ -104,6 +119,9 @@ app.use("/chat", appAuth, perUserLimit, chatRoute);
 const assistantRoutes = require("./assistant/routes");
 app.get("/assistant/stream/:sid", assistantRoutes.streamHandler);
 app.use("/assistant", appAuth, perUserLimit, assistantRoutes);
+
+// Onboarding survey + profile view (feeds users table + agent memory).
+app.use("/profile", appAuth, require("./routes/profile"));
 
 
 // Phase 1 / ADR-004 — the user-visible audit trail of assistant actions.

@@ -21,14 +21,70 @@ const PLACES_RX =
   /\b(near me|nearby|restaurants?|cafes?|hotels?|hospitals?|pharmac|petrol|atm|shops?|stores?|salon|gym|temple|around here)\b/i;
 const WEATHER_RX = /\b(weather|rain|temperature|hot|cold|forecast|umbrella)\b/i;
 
+// Current-affairs / factual questions that must be answered from LIVE
+// sources, never from the model's stale training data: "who is the
+// prime minister of X", "current president", "capital of", scores…
+const FACTUAL_RX =
+  /\b(who is|who'?s)\s+(the\s+)?(current\s+)?(prime minister|pm|president|ceo|chief minister|cm|governor|captain|coach|owner|founder|king|queen)\b|\b(capital|population|currency) of\b|\bhow (old|tall|rich) is\b|\bwhen (is|was|did)\b.*\b(match|election|festival|launch)\b/i;
+
 /** Does this turn belong to the search agent at all? */
 function matches(text) {
   return (
     NEWS_RX.test(text) ||
     PLACES_RX.test(text) ||
     WEATHER_RX.test(text) ||
+    FACTUAL_RX.test(text) ||
     /\b(search|look up|find out|google)\b/i.test(text)
   );
+}
+
+/* ---------------- free live knowledge (no API keys) ---------------- */
+
+const KNOW_TIMEOUT = 6000;
+
+/** DuckDuckGo Instant Answers — free, keyless. */
+async function duckduckgo(q) {
+  const url =
+    "https://api.duckduckgo.com/?format=json&no_html=1&skip_disambig=1&q=" +
+    encodeURIComponent(q);
+  const r = await fetch(url, { signal: AbortSignal.timeout(KNOW_TIMEOUT) });
+  if (!r.ok) return null;
+  const j = await r.json();
+  const answer = j.Answer || j.AbstractText || j.Definition;
+  if (answer) return String(answer).slice(0, 600);
+  const rel = j.RelatedTopics?.find((t) => t.Text);
+  return rel ? String(rel.Text).slice(0, 400) : null;
+}
+
+/** Wikipedia REST summary — free, keyless; good for people/places. */
+async function wikipedia(q) {
+  const s = await fetch(
+    "https://en.wikipedia.org/w/rest.php/v1/search/title?limit=1&q=" +
+      encodeURIComponent(q),
+    { signal: AbortSignal.timeout(KNOW_TIMEOUT) }
+  );
+  if (!s.ok) return null;
+  const sj = await s.json();
+  const key = sj.pages?.[0]?.key;
+  if (!key) return null;
+  const r = await fetch(
+    "https://en.wikipedia.org/api/rest_v1/page/summary/" +
+      encodeURIComponent(key),
+    { signal: AbortSignal.timeout(KNOW_TIMEOUT) }
+  );
+  if (!r.ok) return null;
+  const j = await r.json();
+  return j.extract ? String(j.extract).slice(0, 700) : null;
+}
+
+/** Strip question words down to a lookup subject. */
+function subjectOf(text) {
+  return text
+    .replace(/\b(who is|who'?s|what is|what'?s|tell me about|search|look up|find out|about|the|current|please)\b/gi, " ")
+    .replace(/[?.!]+/g, " ")
+    .replace(/\s{2,}/g, " ")
+    .trim()
+    .slice(0, 80);
 }
 
 /** Pull a topic out of "news about X" / "search for X" phrasing. */
@@ -90,6 +146,26 @@ async function handle(turn) {
         );
       }
     } catch (_) {}
+  }
+
+  // Factual "who/what is…" → free live knowledge, tried in order.
+  if (FACTUAL_RX.test(text) || (grounding.length === 0 && /\b(search|look up|find out)\b/i.test(text))) {
+    const subject = subjectOf(text);
+    if (subject) {
+      let fact = null;
+      try {
+        fact = await duckduckgo(text);
+      } catch (_) {}
+      if (!fact) {
+        try {
+          fact = await wikipedia(subject);
+        } catch (_) {}
+      }
+      if (fact) {
+        used.push({ tool: "knowledge", label: `Looking up ${subject}…` });
+        grounding.push("LIVE KNOWLEDGE LOOKUP:\n" + fact);
+      }
+    }
   }
 
   const extraSystem =
