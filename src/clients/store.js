@@ -166,6 +166,14 @@ async function findByName(userId, spoken, limit = 3) {
   const msgWords = new Set(msg.trim().split(/\s+/).filter(Boolean));
   if (!msgWords.size) return [];
 
+  // Common words that are never a distinguishing name on their own — a
+  // client literally named "A" or "The" shouldn't match every sentence.
+  const COMMON = new Set([
+    "a", "an", "the", "my", "me", "to", "of", "is", "in", "on", "for",
+    "and", "or", "his", "her", "him", "she", "he", "it", "that", "this",
+    "patient", "client", "case", "file", "details", "show", "give",
+  ]);
+
   const rows = await listClients(userId, MAX_PER_USER);
   const scored = [];
   for (const c of rows) {
@@ -175,13 +183,20 @@ async function findByName(userId, spoken, limit = 3) {
     let score = 0;
     if (msg.includes(" " + name + " ")) score = 100;
     else {
-      const hits = words.filter((w) => msgWords.has(w)).length;
-      if (hits === words.length) score = 80;
+      // Only count DISTINCTIVE name words (ignore common filler) so a
+      // one-word match must be a real, specific name to score.
+      const distinctive = words.filter((w) => !COMMON.has(w));
+      const pool = distinctive.length ? distinctive : words;
+      const hits = pool.filter((w) => msgWords.has(w)).length;
+      if (hits && hits === words.length) score = 80;
       else if (hits > 0) score = 40 * hits;
       else {
         // prefix match helps STT clippings ("Ramesh" heard as "Rames")
         for (const mw of msgWords) {
-          if (mw.length >= 4 && words[0].startsWith(mw)) { score = 25; break; }
+          if (mw.length >= 4 && !COMMON.has(mw) && words[0].startsWith(mw)) {
+            score = 25;
+            break;
+          }
         }
       }
     }

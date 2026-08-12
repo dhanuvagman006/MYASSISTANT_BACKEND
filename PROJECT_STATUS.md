@@ -433,3 +433,9 @@ against real Postgres (`npm test`).
   `SharePlus.instance.share(ShareParams(files: …))`.
 - Optional: let the client case-file screen link *existing* saved documents
   (backend already supports `POST /clients/:id/docs/:docId`).
+
+## Update — 12 Aug 2026 (2): Fuzzy name-match hardening
+- `clients/store.findByName` now ignores common filler words ("the", "my",
+  "patient", "details"…) when scoring one-word matches, so a stray common
+  word can't false-match a person. Full-name and multi-word matches are
+  unchanged. Covered by a new test ("common words don't false-match").

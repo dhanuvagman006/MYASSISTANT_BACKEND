@@ -167,6 +167,10 @@ function check(name, cond) {
   const m2 = await store.findByName(U, "details about Sharma");
   check("single-word surname match", m2[0]?.client.id === sharma.id);
   check("no false match", (await store.findByName(U, "weather in Mysuru")).length === 0);
+  // Common filler words in the query must not match a person (guards the
+  // fuzzy scorer from firing on "the", "my", "patient", etc.).
+  check("common words don't false-match",
+    (await store.findByName(U, "show me the details for my patient")).length === 0);
 
   console.log("intents — case-file recall …");
   const turn = (text) =>
