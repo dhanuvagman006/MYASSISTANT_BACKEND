@@ -178,6 +178,42 @@ async function init() {
     );
     CREATE INDEX IF NOT EXISTS idx_docs_user ON documents(user_id, created_at DESC);
     CREATE INDEX IF NOT EXISTS idx_docs_fts ON documents USING GIN (fts);
+
+    -- CLIENTS / PATIENTS (professional mode, Aug 2026): a doctor, lawyer,
+    -- CA… keeps a per-person case file. Documents link to a client via
+    -- documents.client_id; dated case notes live in client_notes. Voice
+    -- recall ("pull up patient Ramesh's file") reads all three together.
+    -- User-visible, user-deletable, exported by /privacy/export and wiped
+    -- by account erasure — same contract as documents and memories.
+    CREATE TABLE IF NOT EXISTS clients (
+      id         BIGSERIAL PRIMARY KEY,
+      user_id    INTEGER NOT NULL,
+      name       TEXT NOT NULL,
+      kind       TEXT NOT NULL DEFAULT 'client',  -- patient | client | student | customer | other
+      phone      TEXT NOT NULL DEFAULT '',
+      email      TEXT NOT NULL DEFAULT '',
+      summary    TEXT NOT NULL DEFAULT '',        -- one-line profile ("42M, diabetic" / "Property dispute, Sy.No 12")
+      tags       TEXT NOT NULL DEFAULT '',
+      created_at BIGINT NOT NULL,
+      updated_at BIGINT NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS idx_clients_user ON clients(user_id, updated_at DESC);
+
+    -- Dated case/visit notes ("note for patient Ramesh: allergic to
+    -- penicillin"). Append-style; each note keeps its own timestamp so
+    -- the profile reads as a timeline.
+    CREATE TABLE IF NOT EXISTS client_notes (
+      id         BIGSERIAL PRIMARY KEY,
+      user_id    INTEGER NOT NULL,
+      client_id  BIGINT NOT NULL,
+      text       TEXT NOT NULL,
+      created_at BIGINT NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS idx_client_notes ON client_notes(user_id, client_id, id DESC);
+
+    -- Migration: link documents to a client (NULL = personal document).
+    ALTER TABLE documents ADD COLUMN IF NOT EXISTS client_id BIGINT;
+    CREATE INDEX IF NOT EXISTS idx_docs_client ON documents(user_id, client_id, created_at DESC);
   `);
   // SERIAL ids come back from pg as integers; BIGINT columns come back as
   // strings by default — parse them so Date-math keeps working.

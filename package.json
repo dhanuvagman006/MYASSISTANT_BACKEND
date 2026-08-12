@@ -6,7 +6,8 @@
   "scripts": {
     "start": "node src/server.js",
     "dev": "node --watch src/server.js",
-    "test": "node scripts/agents-test.js && node scripts/audit-test.js && node scripts/smoke-test.js",
+    "test": "node scripts/agents-test.js && node scripts/clients-test.js && node scripts/audit-test.js && node scripts/smoke-test.js",
+    "test:clients": "node scripts/clients-test.js",
     "test:agents": "node scripts/agents-test.js"
   },
   "engines": {

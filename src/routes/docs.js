@@ -17,6 +17,11 @@ const fs = require("fs");
 const docs = require("../docs/store");
 const { analyzeDocument } = require("../docs/analyze");
 const audit = require("../audit/log");
+// BUGFIX (Aug 2026): `memory` was used below but never required — every
+// DELETE /docs/:id threw ReferenceError, and the post-analysis memory
+// fact silently never landed.
+const memory = require("../agents/memory");
+const clients = require("../clients/store");
 
 const upload = multer({
   storage: multer.memoryStorage(),
@@ -46,12 +51,11 @@ async function analyzeInBackground(userId, row, buffer, mime) {
     // doc search when relevant — duplicating them here made the AI read
     // the same content twice in recall answers.
     const when = meta.docDate || new Date().toISOString().slice(0, 10);
-    await memory.remember(userId, {
-      key: `doc_${updated.id}`,
-      value: `Saved a ${updated.category || "document"}: "${updated.title}" dated ${when}`,
-      category: "context",
-      source: "ai",
-    });
+    await memory.saveMemory(
+      userId,
+      `Saved a ${updated.category || "document"}: "${updated.title}" dated ${when}`,
+      1 // minor context fact — first to be evicted when memory is full
+    );
   } catch (e) {
     console.error("docs background analyze:", e.message);
   }
@@ -79,12 +83,48 @@ router.post(
     note: req.body.note,
   });
 
+  // PROFESSIONAL MODE: file the document under a client/patient.
+  //  • explicit — the app sent clientId (upload from a case-file screen);
+  //  • spoken   — the save-note names a known client ("this is patient
+  //    Ramesh's blood report") → auto-link to the confident match only.
+  let linkedClient = null;
+  try {
+    const explicit = Number(req.body.clientId);
+    if (Number.isInteger(explicit) && explicit > 0) {
+      if (await clients.linkDocument(id, row.id, explicit)) {
+        linkedClient = await clients.getClient(id, explicit);
+      }
+    } else if (req.body.note) {
+      const matches = await clients.findByName(id, req.body.note, 2);
+      // Auto-link ONLY on an unambiguous, high-confidence hit — a wrong
+      // guess in a patient file is worse than no guess.
+      if (matches.length && matches[0].score >= 80 &&
+          (matches.length === 1 || matches[1].score < matches[0].score)) {
+        await clients.linkDocument(id, row.id, matches[0].client.id);
+        linkedClient = matches[0].client;
+      }
+    }
+  } catch (e) {
+    console.warn("docs client-link skipped:", e.message);
+  }
+
   // Respond the moment the file is safely on disk — a voice "save this
   // receipt" must not hold the conversation hostage to a slow AI call.
   // Analysis (title/summary/tags + the memory fact) completes in the
   // background and shows up on the next GET /docs.
-  res.json({ ok: true, document: docs.toClient(row), analyzed: false });
-  audit.record(id, "document.saved", f.originalname || `document #${row.id}`);
+  res.json({
+    ok: true,
+    document: docs.toClient(row),
+    analyzed: false,
+    // Filing confirmation for the app ("Saved to Ramesh's file").
+    client: linkedClient ? { id: linkedClient.id, name: linkedClient.name } : null,
+  });
+  audit.record(
+    id,
+    "document.saved",
+    (f.originalname || `document #${row.id}`) +
+      (linkedClient ? ` → filed under "${linkedClient.name}"` : "")
+  );
 
   healAttempted.add(row.id);
   await analyzeInBackground(id, row, f.buffer, f.mimetype);
@@ -131,9 +171,13 @@ router.delete("/:id", async (req, res) => {
   const id = uid(req, res);
   if (id === null) return;
   const docId = Number(req.params.id);
+  // Read the row BEFORE deletion — the title identifies the context fact.
+  const row = await docs.getDocument(id, docId);
   const ok = await docs.deleteDocument(id, docId);
   if (ok) {
-    await memory.deleteByKey?.(id, `doc_${docId}`);
+    if (row?.title) {
+      await memory.deleteFactsContaining(id, `"${row.title}"`).catch(() => {});
+    }
     audit.record(id, "document.deleted", `document #${docId} and its memory fact`);
   }
   res.status(ok ? 200 : 404).json(ok ? { ok: true } : { error: "not found" });

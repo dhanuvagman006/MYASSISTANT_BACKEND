@@ -53,6 +53,10 @@ function guessCategory(note) {
   if (/prescription|पर्च/.test(n)) return "prescription";
   if (/report|test|lab|scan|x-?ray|medical/.test(n)) return "medical";
   if (/ticket/.test(n)) return "ticket";
+  // Government / photo ID — the words people actually say when saving one.
+  // Handles common STT mishearings of "aadhaar" (adhar/aadhar/aadar…).
+  if (/\ba+dh?a+r\b|aadhaar|pan\s*card|\bpan\b|passport|licen[cs]e|driving|voter|ration\s*card|\bid\s*(card|proof)\b|identity|ಆಧಾರ್|आधार|ஆதார்|ఆధార్|ആധാർ/.test(n))
+    return "id";
   return "other";
 }
 
@@ -176,6 +180,11 @@ async function searchDocuments(userId, message, limit = 3) {
   if (rows.length === 0 && /\b(receipt|bill|invoice|paid|payment)\w*/i.test(message)) {
     rows = await recentByCat("receipt", "bill");
   }
+  if (rows.length === 0 &&
+      /\ba+dh?a+r\b|aadhaar|\bpan\b|passport|licen[cs]e|driving|voter|ration|\bid\b|identity|ಆಧಾರ್|आधार|ஆதார்|ఆధార్|ആധാർ/i.test(message)) {
+    // "show my Aadhaar / PAN / passport" — surface saved ID documents.
+    rows = await recentByCat("id", "id");
+  }
   if (rows.length) return { hits: rows, exact: true };
 
   // LAST RESORT: the user is clearly asking about a saved document —
@@ -219,6 +228,7 @@ function toClient(d) {
     summary: d.summary,
     note: d.note,
     tags: d.tags,
+    clientId: d.client_id || null, // professional mode: which case file it's in
     createdAt: d.created_at,
   };
 }
@@ -231,6 +241,7 @@ async function countDocuments(userId) {
 module.exports = {
   countDocuments,
   createDocument,
+  guessCategory,
   setMetadata,
   setNote,
   getDocument,

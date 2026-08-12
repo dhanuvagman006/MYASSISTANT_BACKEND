@@ -76,13 +76,96 @@ async function main() {
     });
     assert(li.status === 200 && li.json?.isNew === false, "/auth/login");
 
-    // Memory (seeded at signup + CRUD)
-    const mem = await req("GET", "/memory", { token });
-    assert(mem.status === 200 && mem.json.memories.length >= 2, "memory seeding");
-    const add = await req("POST", "/memory", {
-      token, body: { key: "smoke_key", value: "smoke value", category: "fact" },
+    // Memory — REPAIRED (Aug 2026): the old key-value /memory API this
+    // test used was removed when agent_memories landed; seed via the
+    // real survey endpoint and read back through GET /profile.
+    const sv = await req("POST", "/profile/survey", {
+      token,
+      body: { name: "Smoke", location: "Mysuru", preferences: ["cricket"] },
     });
-    assert(add.status === 200, "/memory add");
+    assert(sv.status === 200, "/profile/survey");
+    const prof = await req("GET", "/profile", { token });
+    assert(
+      prof.status === 200 && (prof.json.memories || []).length >= 2,
+      "memory seeding via survey"
+    );
+
+    // Clients / patients (professional mode)
+    const cc = await req("POST", "/clients", {
+      token, body: { name: "Ramesh Gowda", kind: "patient", summary: "42M" },
+    });
+    assert(cc.status === 200 && cc.json.client?.id, "/clients create");
+    const cid = cc.json.client.id;
+    const cn = await req("POST", `/clients/${cid}/notes`, {
+      token, body: { text: "allergic to penicillin" },
+    });
+    assert(cn.status === 200 && cn.json.note?.id, "/clients add note");
+    const cp = await req("GET", `/clients/${cid}`, { token });
+    assert(
+      cp.status === 200 &&
+        cp.json.client?.name === "Ramesh Gowda" &&
+        cp.json.notes?.length === 1 &&
+        Array.isArray(cp.json.documents),
+      "/clients case file"
+    );
+    const cl = await req("GET", "/clients", { token });
+    assert(cl.status === 200 && cl.json.clients?.length === 1, "/clients list");
+    const cd = await req("DELETE", `/clients/${cid}`, { token });
+    assert(cd.status === 200, "/clients delete");
+
+    // Documents: upload (no AI key — analysis is skipped gracefully) then
+    // DELETE. Regression: delete used to crash the process with a
+    // ReferenceError (`memory` was never imported in routes/docs.js).
+    {
+      const fd = new FormData();
+      fd.append("note", "smoke receipt");
+      fd.append(
+        "file",
+        new Blob([Buffer.from([0xff, 0xd8, 0xff, 0xdb, 1, 2, 3])],
+          { type: "image/jpeg" }),
+        "smoke.jpg"
+      );
+      const up = await fetch(BASE + "/docs", {
+        method: "POST",
+        headers: { authorization: `Bearer ${token}` },
+        body: fd,
+      });
+      const upJson = await up.json();
+      assert(up.status === 200 && upJson.document?.id, "/docs upload");
+      const dd = await req("DELETE", `/docs/${upJson.document.id}`, { token });
+      assert(dd.status === 200, "/docs delete (regression: must not crash)");
+      const dl = await req("GET", "/docs", { token });
+      assert(dl.status === 200 && dl.json.documents.length === 0, "/docs list empty");
+    }
+
+    // ID DOCUMENTS ("show my Aadhaar card"): saving with an ID note must
+    // categorise as `id` from the words alone (no AI), and the doc must
+    // come back tagged so the app can show + Send it.
+    {
+      const fd = new FormData();
+      fd.append("note", "this is my aadhaar card");
+      fd.append(
+        "file",
+        new Blob([Buffer.from([0xff, 0xd8, 0xff, 0xdb, 9, 9, 9])],
+          { type: "image/jpeg" }),
+        "aadhaar.jpg"
+      );
+      const up = await fetch(BASE + "/docs", {
+        method: "POST",
+        headers: { authorization: `Bearer ${token}` },
+        body: fd,
+      });
+      const upJson = await up.json();
+      assert(
+        up.status === 200 && upJson.document?.category === "id",
+        "aadhaar note categorised as id"
+      );
+      const dl = await req("GET", "/docs", { token });
+      assert(
+        dl.status === 200 && dl.json.documents.some((d) => d.category === "id"),
+        "id document listed"
+      );
+    }
 
     // Reminders CRUD
     const cr = await req("POST", "/reminders", {
@@ -101,8 +184,8 @@ async function main() {
     assert(gi.status === 409, "/google/inbox should 409 when unlinked");
 
     // Auth is actually enforced
-    const noauth = await req("GET", "/memory");
-    assert(noauth.status === 401, "unauthenticated /memory should 401");
+    const noauth = await req("GET", "/clients");
+    assert(noauth.status === 401, "unauthenticated /clients should 401");
 
     console.log("SMOKE TEST PASSED ✔");
   } finally {

@@ -34,6 +34,8 @@ const USER_TABLES = [
   ["google_tokens", "user_id"],
   ["agent_memories", "user_id"], // everything the assistant remembers
   ["bookings", "user_id"], // the booking agent's ledger
+  ["clients", "user_id"], // professional mode: patient/client cards
+  ["client_notes", "user_id"], // …and their dated case notes
 ];
 
 async function existingUserTables() {

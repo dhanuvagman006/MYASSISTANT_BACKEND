@@ -24,6 +24,8 @@ const units = require("./tools/units");
 const news = require("./tools/news");
 const reminders = require("../reminders/store");
 const docsStore = require("../docs/store");
+const clientsStore = require("../clients/store");
+const audit = require("../audit/log");
 const gtokens = require("../google/tokens");
 const gapi = require("../google/api");
 
@@ -39,8 +41,20 @@ const RE = {
     /\b(morning|daily) briefing\b|\bbrief(ing)? (me|my day|about my day)\b|\bstart my day\b|\bhow('| i)?s my day look/i,
   nearby:
     /\b(near ?(me|by|est)|nearby|closest|around here|walking distance)\b|\bnear my (place|home|location)\b/i,
+  // PROFESSIONAL MODE (doctor/lawyer): "give me the details about patient
+  // Ramesh", "pull up client Sharma's file", "what do I know about my
+  // patient Lakshmi", "case history of client Ravi".
+  clientRecall:
+    /\b(patient|client|case)\b.{0,60}\b(details?|information|info|file|history|records?|documents?|reports?|notes?|summary|background|update)\b|\b(details?|information|info|file|history|records?|documents?|reports?|notes?|summary|background)\b.{0,60}\b(patient|client)\b|\b(pull up|open|show|tell me about|brief me on|remind me about|what do (i|you) know about)\b.{0,30}\b(patient|client)\b/i,
+  // "note for patient Ramesh: allergic to penicillin" / "add a note to
+  // client Sharma's file — hearing moved to Friday" / "remember that my
+  // patient Lakshmi is diabetic".
+  clientNote:
+    /\b(note|notes)\b.{0,25}\b(for|to|on|about|under)\b.{0,30}\b(patient|client)\b|\badd\b.{0,20}\bnote\b|\bremember\b.{0,20}\b(that\s+)?(my\s+)?(patient|client)\b/i,
+  clientList:
+    /\b(who are|list|show|how many)\b.{0,20}\b(my )?(patients|clients)\b|\bmy (patients|clients)\b\s*\??$/i,
   docRecall:
-    /\b(reports?|documents?|prescriptions?|receipts?|recipes?|records?|scan|photocopy|test results?|x-?rays?|lab (results?|reports?)|medical (file|history)|bill|invoice)\b|\b(doctor|hospital|clinic)\b.{0,40}\b(said|told|suggested|suggestions?|advice|advised|gave|prescribed|recommend\w*)\b|\b(said|told|suggested|suggestions?|advice|advised|gave|prescribed|recommend\w*)\b.{0,40}\b(doctor|hospital|clinic)\b/i,
+    /\b(reports?|documents?|prescriptions?|receipts?|recipes?|records?|scan|photocopy|test results?|x-?rays?|lab (results?|reports?)|medical (file|history)|bill|invoice)\b|\b(a+dh?a+r|aadhaar|pan\s*card|passport|licen[cs]e|voter\s*id|ration\s*card|id\s*(card|proof)|आधार|ಆಧಾರ್|ஆதார்|ఆధార్|ആധാർ)\b|\b(doctor|hospital|clinic)\b.{0,40}\b(said|told|suggested|suggestions?|advice|advised|gave|prescribed|recommend\w*)\b|\b(said|told|suggested|suggestions?|advice|advised|gave|prescribed|recommend\w*)\b.{0,40}\b(doctor|hospital|clinic)\b/i,
   calCreate:
     /\b(schedule|create|add|put|set ?up|book|arrange|fix)\b.{0,40}\b(meeting|event|appointment|call)\b|\b(meeting|event|appointment)\b.{0,30}\b(schedule|create|add|put|book)\b|\badd (it |this )?to (my )?calendar\b/i,
   draftReply:
@@ -386,9 +400,171 @@ async function buildToolContext({ userId, messages, tzOffsetMin = 330, lat, lng 
         }
       }
 
+      // ================= PROFESSIONAL MODE: CLIENTS / PATIENTS =========
+      // A doctor or lawyer keeps per-person case files. Three intents,
+      // checked in write-before-read order. When a client turn was
+      // handled, the generic document search below is skipped — the case
+      // file already carries that client's documents.
+      let clientHandled = false;
+
+      // ---- CLIENT NOTE (deterministic write): "note for patient Ramesh:
+      // allergic to penicillin" / "remember that my client Sharma prefers
+      // evening hearings". ----
+      if (userId && RE.clientNote.test(msg) && /\b(patient|client)\b/i.test(msg)) {
+        const nameM = msg.match(
+          /\b(patient|client)\s+([\p{L}][\p{L}.'-]*(?:\s+[\p{L}][\p{L}.'-]*){0,2})/iu
+        );
+        // Cut the captured name at the first verb/filler so "Ramesh is
+        // allergic" doesn't become a three-word name.
+        let spokenName = (nameM?.[2] || "")
+          .split(/\s+/)
+          .reduce((acc, w) => {
+            if (acc.stop) return acc;
+            if (/^(is|has|was|will|needs|prefers|wants|said|told|that|about|to|his|her|their)$/i.test(w)) {
+              acc.stop = true;
+              return acc;
+            }
+            acc.words.push(w);
+            return acc;
+          }, { words: [], stop: false })
+          .words.join(" ")
+          .replace(/[:,\-–—]+$/, "")
+          .trim();
+
+        if (spokenName) {
+          const matches = await clientsStore.findByName(userId, spokenName, 2);
+          let target =
+            matches.length && matches[0].score >= 80 &&
+            (matches.length === 1 || matches[1].score < matches[0].score)
+              ? matches[0].client
+              : null;
+          // First mention of a new person auto-creates the card — saying
+          // "note for patient Ramesh: …" should never fail with "who?".
+          let created = false;
+          if (!target && !matches.length) {
+            const kind = /\bpatient\b/i.test(msg) ? "patient" : "client";
+            try {
+              target = await clientsStore.createClient(userId, { name: spokenName, kind });
+              created = true;
+            } catch (_) {}
+          }
+          if (target) {
+            // The note text = everything after the name (or after ":").
+            const idx = msg.toLowerCase().indexOf(spokenName.toLowerCase());
+            let noteText = idx >= 0 ? msg.slice(idx + spokenName.length) : "";
+            noteText = noteText.replace(/^[\s:,\-–—]+/, "").trim();
+            if (noteText.length >= 3) {
+              await clientsStore.addNote(userId, target.id, noteText);
+              audit.record(userId, "client.note.added", `voice note on "${target.name}"`);
+              blocks.push(
+                `TOOL RESULT — CLIENT NOTE SAVED: a dated note was JUST added to ${target.kind} ` +
+                  `"${target.name}"'s case file${created ? ` (new ${target.kind} card was created for them)` : ""}: ` +
+                  `"${noteText.slice(0, 200)}". Confirm it back in ONE short sentence — mention the name so they can catch a wrong match.`
+              );
+              clientHandled = true;
+            }
+          } else if (matches.length > 1) {
+            blocks.push(
+              "TOOL RESULT — CLIENT NOTE: the name matches more than one person (" +
+                matches.map((m) => `"${m.client.name}"`).join(", ") +
+                "). NO note was saved. Ask which one they meant, using the full names."
+            );
+            clientHandled = true;
+          }
+        }
+      }
+
+      // ---- CLIENT RECALL (the case file, spoken + on screen): "give me
+      // the details about patient Ramesh" / "pull up client Sharma's file". ----
+      if (userId && !clientHandled && RE.clientRecall.test(msg)) {
+        const matches = await clientsStore.findByName(userId, msg, 3);
+        const best = matches[0];
+        const confident =
+          best && best.score >= 40 &&
+          (matches.length === 1 || matches[1].score < best.score);
+
+        if (confident) {
+          const profile = await clientsStore.getProfile(userId, best.client.id);
+          const c = profile.client;
+          audit.record(userId, "client.viewed", `case file of "${c.name}" (voice recall)`);
+
+          // Show the linked documents on screen while the summary is spoken.
+          for (const d of profile.documents.slice(0, 3)) {
+            documents.push(docsStore.toClient(d));
+          }
+
+          const day = (ms) =>
+            new Date(ms + tzOffsetMin * 60_000).toISOString().slice(0, 10);
+          const noteLines = profile.notes
+            .slice(0, 8)
+            .map((n) => `  • [${day(n.created_at)}] ${n.text}`);
+          const docLines = profile.documents.slice(0, 5).map(
+            (d, i) =>
+              `  ${i + 1}. "${d.title || docsStore.fallbackTitle(d)}"` +
+              (d.doc_date ? ` dated ${d.doc_date}` : "") +
+              (d.summary ? ` — ${d.summary}` : "")
+          );
+          const newest = profile.documents[0];
+          const fullText = newest ? String(newest.full_text || "").slice(0, 3000) : "";
+
+          blocks.push(
+            `TOOL RESULT — CASE FILE of ${c.kind} "${c.name}"` +
+              (c.summary ? ` (${c.summary})` : "") +
+              (c.phone ? ` · phone ${c.phone}` : "") +
+              (c.email ? ` · ${c.email}` : "") +
+              ":\n" +
+              (noteLines.length
+                ? `CASE NOTES (newest first):\n${noteLines.join("\n")}\n`
+                : "CASE NOTES: none yet.\n") +
+              (docLines.length
+                ? `LINKED DOCUMENTS (being SHOWN on the user's screen right now):\n${docLines.join("\n")}\n`
+                : "LINKED DOCUMENTS: none yet.\n") +
+              (fullText
+                ? `COMPLETE TEXT OF THE NEWEST DOCUMENT (exactly as printed):\n${fullText}\n`
+                : "") +
+              "The user is a professional (doctor/lawyer/etc.) asking about THEIR OWN client's file. " +
+              "Answer their question FROM this data only — ONCE, concisely, newest information first. " +
+              "Be EXACT with every date, dosage, amount and name; never round, never invent, and say plainly " +
+              "if the file doesn't contain what they asked. Never read file names aloud. " +
+              "If documents are listed, mention they're on screen in a few words."
+          );
+          sources.push({ name: `${c.name} — case file`, url: "" });
+          clientHandled = true;
+        } else if (matches.length > 1) {
+          blocks.push(
+            "TOOL RESULT — CLIENT LOOKUP: more than one person matches (" +
+              matches.map((m) => `"${m.client.name}" (${m.client.kind})`).join(", ") +
+              "). Ask which one they meant, reading the full names."
+          );
+          clientHandled = true;
+        } else if ((await clientsStore.countClients(userId)) > 0 || /\b(patient|client)\b/i.test(msg)) {
+          blocks.push(
+            "TOOL RESULT — CLIENT LOOKUP: no saved patient/client matches that name. " +
+              "Say so briefly; tell them they can add people from the Clients screen, or just say " +
+              "\"note for patient <name>: …\" and the card is created automatically."
+          );
+          clientHandled = true;
+        }
+      }
+
+      // ---- CLIENT LIST: "who are my patients?" ----
+      if (userId && !clientHandled && RE.clientList.test(msg)) {
+        const rows = await clientsStore.listClients(userId, 25);
+        blocks.push(
+          rows.length
+            ? "TOOL RESULT — the user's saved clients/patients (most recently active first):\n" +
+                rows.map((c) => `  • ${c.name} (${c.kind})${c.summary ? " — " + c.summary : ""}`).join("\n") +
+                "\nRead the names conversationally; give the count. Do not invent anyone."
+            : "TOOL RESULT — the user has no saved clients/patients yet. Tell them they can add people " +
+                "from the Clients screen or by saying \"note for patient <name>: …\"."
+        );
+        clientHandled = true;
+      }
+
       // ---- SAVED DOCUMENTS RECALL ("show me the report from my last
-      // hospital visit") — pure FTS lookup, zero extra AI/network calls. ----
-      if (userId && RE.docRecall.test(msg)) {
+      // hospital visit") — pure FTS lookup, zero extra AI/network calls.
+      // Skipped when a client turn already carried that person's documents. ----
+      if (userId && !clientHandled && RE.docRecall.test(msg)) {
         const { hits, exact } = await docsStore.searchDocuments(userId, msg, 3);
         if (hits.length) {
           for (const d of hits) documents.push(docsStore.toClient(d));
@@ -403,20 +579,29 @@ async function buildToolContext({ userId, messages, tzOffsetMin = 330, lat, lng 
           // from the real content, not just the summary.
           const top = hits[0];
           const fullText = String(top.full_text || "").slice(0, 3500);
+          // PRIVACY: an ID card (Aadhaar/PAN/passport…) is on screen for the
+          // user to see and send — but its number must NOT be read aloud,
+          // where anyone nearby could hear it. Show, don't recite.
+          const isId = top.category === "id";
           blocks.push(
             (exact
               ? "TOOL RESULT — MATCHING SAVED DOCUMENTS (they are being SHOWN on the user's screen right now):\n"
               : "TOOL RESULT — no exact keyword match, so these are the user's MOST RECENT saved documents (SHOWN on their screen now). Be honest: say you're showing their recent saves and ask if one of these is it — do NOT claim a confirmed match:\n") +
               lines.join("\n") +
-              (fullText
+              (fullText && !isId
                 ? `\nCOMPLETE TEXT OF DOCUMENT 1 (exactly as printed):\n${fullText}`
                 : "") +
               "\nBriefly confirm it's on their screen, then answer their question FROM this data — " +
               "ONCE, concisely. NEVER repeat the same information twice in your reply. " +
-              "NEVER say a file name aloud (no .jpg/.pdf names) — refer to it by its title or just 'this receipt/report'. " +
-              "If they ask what's written, to read it, or what something means: use the COMPLETE TEXT — " +
-              "keep every amount, date, medicine and name EXACT, and explain unfamiliar terms in simple, " +
-              "reassuring plain language a non-expert immediately understands. " +
+              "NEVER say a file name aloud (no .jpg/.pdf names) — refer to it by its title or just 'this document'. " +
+              (isId
+                ? "This is an IDENTITY DOCUMENT. It's now on the user's screen and they can tap Send to share it. " +
+                  "Say it's ready — e.g. 'Here's your Aadhaar card, tap send to share it.' " +
+                  "Do NOT read out the ID number, date of birth or any digits aloud, even if asked — " +
+                  "tell them it's visible on screen for them to check. "
+                : "If they ask what's written, to read it, or what something means: use the COMPLETE TEXT — " +
+                  "keep every amount, date, medicine and name EXACT, and explain unfamiliar terms in simple, " +
+                  "reassuring plain language a non-expert immediately understands. ") +
               "Include the USER'S OWN NOTE only when they asked what was said/suggested/advised, " +
               "or when it directly answers the question — otherwise skip it. " +
               "Never invent details that are not above; if the text doesn't contain what they asked, say so graciously."

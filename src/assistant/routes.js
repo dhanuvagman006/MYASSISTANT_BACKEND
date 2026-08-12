@@ -210,6 +210,13 @@ async function runTurn(s, req, userText) {
         lng: parseFloat(req.get("X-Geo-Lng")),
       });
       toolBlock = toolCtx.block || "";
+      // Matched saved documents (doc recall + client case files): show
+      // them ON SCREEN while the reply is spoken. This event was the
+      // missing half of voice recall — /chat returned documents but the
+      // voice loop dropped them.
+      if (Array.isArray(toolCtx.documents) && toolCtx.documents.length) {
+        emit(s, { type: "documents", documents: toolCtx.documents.slice(0, 5) });
+      }
     } catch (_) {}
 
     if (s.cancelled) return;

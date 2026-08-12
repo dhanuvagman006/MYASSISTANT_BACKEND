@@ -76,6 +76,22 @@ async function saveMemory(userId, fact, importance = 2) {
   );
 }
 
+/**
+ * Remove facts containing an exact substring (LIKE-escaped). Used when a
+ * saved document is deleted so its "Saved a receipt: …" context fact
+ * doesn't outlive the file. Returns the number of facts removed.
+ */
+async function deleteFactsContaining(userId, substring) {
+  if (!userId) return 0;
+  const s = String(substring || "").trim();
+  if (s.length < 3) return 0; // never mass-delete on a junk needle
+  const escaped = s.replace(/([%_\\])/g, "\\$1");
+  return run(
+    `DELETE FROM agent_memories WHERE user_id = $1 AND fact LIKE $2 ESCAPE '\\'`,
+    [userId, `%${escaped}%`]
+  );
+}
+
 /** Full wipe — called from the privacy/deletion path. */
 async function deleteAllMemories(userId) {
   if (!userId) return;
@@ -135,6 +151,7 @@ module.exports = {
   memoryBlock,
   saveMemory,
   deleteAllMemories,
+  deleteFactsContaining,
   extractAndStore,
   looksSelfDescriptive,
 };

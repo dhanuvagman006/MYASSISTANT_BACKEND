@@ -384,3 +384,52 @@ payment_link.paid), ADMIN_KEY.
      back into /did/llm). Verify the embed script tag attributes against
      docs.d-id.com/docs/embed-quickstart on first run — D-ID versions the
      embed (`agent.d-id.com/v2/index.js`) and attribute names occasionally move.
+
+## Update — 12 Aug 2026: Professional mode (client/patient case files) + document Send + ID recall
+Backend feature work for a doctor/lawyer using the app with many clients, plus
+"show my Aadhaar card → send it". All landed with tests; full suite green
+against real Postgres (`npm test`).
+
+- **New data model** (`src/db.js`): `clients` (name, kind patient|client|
+  student|customer|other, phone, email, one-line summary, tags) and
+  `client_notes` (dated). `documents` gained a nullable `client_id` link
+  (idempotent `ALTER … ADD COLUMN IF NOT EXISTS`). Exported by
+  `/privacy/export`, wiped by `/privacy/account`.
+- **Store + routes**: `src/clients/store.js` (CRUD, dated notes, doc linking,
+  full-profile read, and a fuzzy voice name-matcher tuned for STT messiness)
+  and `src/routes/clients.js` (`/clients` REST, every case-file read audited).
+  Deleting a client KEEPS the documents — they're unlinked, never destroyed.
+- **Voice intents** (`src/services/intents.js`): three professional-mode
+  intents — case-file recall ("give me the details about patient Ramesh":
+  speaks profile + notes + doc text, pushes the documents to screen),
+  deterministic note write ("note for patient Ramesh: …", auto-creates the card
+  on first mention, refuses ambiguous names), and client list. When a client
+  turn runs, the generic document search is skipped (the file already carries
+  that person's docs).
+- **ID documents / "show my Aadhaar card"**: `guessCategory` now recognises
+  Aadhaar (incl. STT mishearings), PAN, passport, licence, voter/ration ID in
+  English + Kannada/Hindi/Tamil/Telugu/Malayalam → category `id`; `docRecall`
+  fires on those words; `searchDocuments` has an `id`-category fallback so the
+  card surfaces even without a full-text hit. **Privacy**: when the top match is
+  an ID, the recall prompt suppresses the full-text block and instructs the AI
+  never to read the number aloud — show on screen, don't recite.
+- **SSE fix**: the voice loop now emits a `documents` event so matched docs
+  appear on screen during voice recall (previously `/chat` returned them but the
+  voice path dropped them silently).
+- **Bugs fixed**: `routes/docs.js` used a `memory` module it never required —
+  every `DELETE /docs/:id` threw a ReferenceError and the post-analysis memory
+  fact never saved (now imported; doc-delete also cleans its context fact via
+  the new `memory.deleteFactsContaining`). The `smoke-test` referenced a
+  removed key-value `/memory` API and failed even on untouched `main` — repaired
+  to use the real survey/profile flow.
+- **Tests**: new `scripts/clients-test.js` (22 assertions, stubbed DB/AI — no
+  Postgres/keys needed) added to `npm test`; `smoke-test` extended with the
+  clients API, an Aadhaar save→category check, and a doc-delete regression.
+
+## NEXT
+- Verify the Flutter side compiles locally (`flutter analyze`) — no Flutter SDK
+  in the build env used for this change. Confirm `share_plus` resolves to 10.x
+  (`Share.shareXFiles`); if pub picks 11.x, update that one call to
+  `SharePlus.instance.share(ShareParams(files: …))`.
+- Optional: let the client case-file screen link *existing* saved documents
+  (backend already supports `POST /clients/:id/docs/:docId`).

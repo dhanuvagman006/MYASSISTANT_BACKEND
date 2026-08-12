@@ -177,6 +177,11 @@ app.use("/vision", appAuth, perUserLimit, require("./routes/vision"));
 // them and pulls them back up from a voice request (see routes/docs.js).
 app.use("/docs", appAuth, require("./routes/docs"));
 
+// PROFESSIONAL MODE — per-client/patient case files (doctor, lawyer…):
+// profile + dated notes + linked documents, recalled by voice
+// ("pull up patient Ramesh's file"). See routes/clients.js.
+app.use("/clients", appAuth, require("./routes/clients"));
+
 // Group C — nearby places search (ratings, distance, call & directions).
 app.use("/places", appAuth, require("./routes/places"));
 
