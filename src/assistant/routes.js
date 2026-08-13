@@ -215,7 +215,7 @@ function detectCallIntent(text) {
 // the app opens the camera, captures, and files it into document memory.
 // A spoken fact ("remember that mom's birthday is in May") is NOT this.
 const SAVE_VERB_RX =
-  /\b(save|remember|keep|store|file)\b|save (ma+du|karo)|yaad rakh|ಸೇವ್|ನೆನಪ|ಇಟ್ಟುಕೊ|सेव|सहेज|याद रख|സേവ്|ஒ|சேமி|సేవ్|గుర్తు/i;
+  /\b(save|remember|keep|store|file)\b|save (ma+du|karo)|yaad rakh|ಸೇವ್|ನೆನಪ|ಇಟ್ಟುಕೊ|सेव|सहेज|याद रख|സേവ്|சேமி|ஞாபக|సేవ్|గుర్తు/i;
 const SCAN_VERB_RX =
   /\b(scan|capture)\b|\bclick (a |one )?(photo|pic|picture)\b|ಸ್ಕ್ಯಾನ್|स्कैन|कैप्चर|ஸ்கேன்|స్కాన్/i;
 const NOTE_THIS_RX =
