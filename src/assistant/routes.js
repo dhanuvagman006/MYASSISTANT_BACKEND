@@ -227,6 +227,21 @@ const DEMONSTRATIVE_RX =
 const FACT_MARKER_RX =
   /\b(is|are|was|were|will|has|have)\b|birthday|meeting|appointment|flight|deadline|anniversary|reminder|remind/i;
 
+// "Open video mode" / "start face mode" — the app opens the human-avatar
+// video call. Anchored to the END of a short utterance so "video call mom"
+// (handled earlier as a real phone call) never lands here.
+const VIDEO_MODE_RX =
+  /\b(open|start|switch to|go to|enable|activate|turn on|show)?\s*(the\s+)?(video|face|avatar)\s*(mode|call|chat|screen)\b(?:\s+(please|now|hari|harry))*\s*$/i;
+
+function detectVideoMode(text) {
+  const t = String(text || "").trim().replace(/[.!?,;।]+$/, "");
+  if (!t) return false;
+  // Sign-off style command; long sentences that merely mention video are not
+  // a request to switch modes.
+  if (t.split(/\s+/).filter(Boolean).length > 6) return false;
+  return VIDEO_MODE_RX.test(t);
+}
+
 function detectSaveDocument(text) {
   const t = String(text || "").trim();
   const hasSaveish =
@@ -280,6 +295,20 @@ async function runTurn(s, req, userText) {
       state(s, "finding_contact");
       emit(s, { type: "contact_lookup", name: callee });
       return; // waits for POST /contacts
+    }
+
+    // "Open video mode" — switch to the human-avatar video call. Checked
+    // AFTER the call intents above so "video call mom" still dials mom.
+    if (!isReminder && detectVideoMode(userText)) {
+      state(s, "speaking");
+      emit(s, {
+        type: "assistant_message",
+        text: "Opening video mode.",
+      });
+      emit(s, { type: "open_video" });
+      state(s, "completed");
+      s.busy = false;
+      return;
     }
 
     // "Save this receipt" / "scan this" / "remember this" — the app opens the
