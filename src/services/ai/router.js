@@ -148,7 +148,9 @@ async function callGemini(messages, system = SYSTEM_PROMPT, _retry = false) {
       );
       return callGemini(messages, system, true);
     }
-    throw new Error(`gemini ${r.status} ${body.slice(0, 300)}`);
+    throw new Error(
+      `gemini ${r.status} [model=${model}] ${body.slice(0, 300) || "(empty body)"}`
+    );
   }
   const data = await r.json();
   return data.candidates?.[0]?.content?.parts?.map((p) => p.text).join("\n") || "";
@@ -233,7 +235,9 @@ async function* generateReplyStream(messages, opts = {}) {
       yield* generateReplyStream(messages, opts);
       return;
     }
-    throw new Error(`gemini stream ${r.status} ${body.slice(0, 300)}`);
+    throw new Error(
+      `gemini stream ${r.status} [model=${model}] ${body.slice(0, 300) || "(empty body)"}`
+    );
   }
 
   const reader = r.body.getReader();
@@ -279,11 +283,13 @@ async function* generateReplyStream(messages, opts = {}) {
 // fall back to the main chat model from then on.
 const DEAD_MODELS = new Set();
 
-function looksRetired(status, body) {
-  if (status !== 404) return false;
-  return /not found|no longer available|not supported|is not available/i.test(
-    String(body || "")
-  );
+/// A 404 from a model endpoint means that model name is unusable for this
+/// key — retired, never existed, or not enabled on this project. The body is
+/// NOT reliable: Google sometimes returns a descriptive JSON error and
+/// sometimes an empty body, so keying off the text made the fallback fail
+/// exactly when it was needed. Status alone is the signal.
+function looksRetired(status) {
+  return status === 404;
 }
 
 async function transcribeAudio(buffer, mimeType, opts = {}) {
@@ -361,16 +367,15 @@ async function transcribeAudio(buffer, mimeType, opts = {}) {
   );
   if (!r.ok) {
     const body = await r.text().catch(() => "");
-    // The configured STT model has been retired (Google returns 404). Don't
-    // let that break speech input: remember it, and immediately retry on the
-    // main chat model. Without this the app reports "I couldn't hear that"
-    // on every single turn while the mic is working perfectly.
-    if (looksRetired(r.status, body) && model !== mainModel) {
+    // 404 = this model name is unusable for this key. Remember it and retry
+    // on the main chat model so speech input keeps working.
+    if (looksRetired(r.status) && model !== mainModel) {
       if (!DEAD_MODELS.has(model)) {
         DEAD_MODELS.add(model);
         console.error(
-          `gemini stt: model "${model}" is retired — falling back to ` +
-            `"${mainModel}". Update GEMINI_STT_MODEL in your .env.`
+          `gemini stt: model "${model}" returned 404 (retired, or not ` +
+            `enabled for this API key) — falling back to "${mainModel}". ` +
+            `Set GEMINI_STT_MODEL= (blank) in your .env to silence this.`
         );
       }
       return transcribeAudio(buffer, mimeType, opts);
@@ -389,10 +394,15 @@ async function transcribeAudio(buffer, mimeType, opts = {}) {
     }
     const alt = mt === "audio/mp4" ? "audio/aac" : "audio/mp4";
     if (r.status >= 400 && r.status < 500 && !opts._retried) {
-      console.warn(`gemini stt ${r.status} with ${mt} — retrying as ${alt}:`, body.slice(0, 200));
+      console.warn(
+        `gemini stt ${r.status} [model=${model}] with ${mt} — retrying as ${alt}:`,
+        body.slice(0, 200) || "(empty body)"
+      );
       return transcribeAudio(buffer, alt, { ...opts, _retried: true });
     }
-    throw new Error(`gemini stt ${r.status} ${body.slice(0, 300)}`);
+    throw new Error(
+      `gemini stt ${r.status} [model=${model}] ${body.slice(0, 300) || "(empty body)"}`
+    );
   }
   const data = await r.json();
   const raw =

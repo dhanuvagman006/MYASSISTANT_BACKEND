@@ -220,6 +220,16 @@ require("./db")
   .then(() => {
     app.listen(port, () => {
       console.log(`MYASSISTANT backend on :${port} (postgres ready)`);
+      // Print the models actually in use. A wrong/retired name otherwise
+      // only shows up as a 404 on the user's first voice turn, which reads
+      // like "the app can't hear me" rather than a config problem.
+      console.log(
+        `  models: chat=${process.env.GEMINI_MODEL || "gemini-2.5-flash"}` +
+          ` stt=${process.env.GEMINI_STT_MODEL || "(same as chat)"}` +
+          ` vision=${process.env.GEMINI_VISION_MODEL || "gemini-2.5-flash"}` +
+          ` tts=${process.env.GEMINI_TTS_MODEL || "gemini-2.5-flash-preview-tts"}` +
+          ` thinking=${process.env.GEMINI_THINKING_LEVEL || "low"}`
+      );
       if (!process.env.GEMINI_API_KEY) {
         console.warn(
           "WARNING: GEMINI_API_KEY not set — /vision and /docs analysis " +
