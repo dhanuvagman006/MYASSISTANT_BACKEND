@@ -193,7 +193,14 @@ async function* generateReplyStream(messages, opts = {}) {
  */
 async function transcribeAudio(buffer, mimeType, opts = {}) {
   const key = requireKey();
-  const model = process.env.GEMINI_MODEL || "gemini-2.5-flash";
+  // STT is an easy task for the model, so a lighter/faster model can cut
+  // transcription latency noticeably. Override with GEMINI_STT_MODEL (e.g.
+  // "gemini-2.5-flash-lite") without touching chat quality; defaults to the
+  // main chat model so existing deploys are unchanged.
+  const model =
+    process.env.GEMINI_STT_MODEL ||
+    process.env.GEMINI_MODEL ||
+    "gemini-2.5-flash";
   // The app records .m4a (AAC in an MP4 container). Normalize the label,
   // and keep a fallback: some Gemini deployments accept audio/mp4 but not
   // audio/aac, others the reverse — a 4xx triggers ONE retry with the
