@@ -210,14 +210,59 @@ function detectCallIntent(text) {
   return m[1].replace(/\b(please|now|for me)\b.*$/i, "").trim() || null;
 }
 
+// ---- SAVE / SCAN A PHYSICAL THING WITH THE CAMERA ----
+// "save this receipt", "scan this", "remember this", "note this down" ->
+// the app opens the camera, captures, and files it into document memory.
+// A spoken fact ("remember that mom's birthday is in May") is NOT this.
+const SAVE_VERB_RX =
+  /\b(save|remember|keep|store|file)\b|save (ma+du|karo)|yaad rakh|ಸೇವ್|ನೆನಪ|ಇಟ್ಟುಕೊ|सेव|सहेज|याद रख|സേവ്|ஒ|சேமி|సేవ్|గుర్తు/i;
+const SCAN_VERB_RX =
+  /\b(scan|capture)\b|\bclick (a |one )?(photo|pic|picture)\b|ಸ್ಕ್ಯಾನ್|स्कैन|कैप्चर|ஸ்கேன்|స్కాన్/i;
+const NOTE_THIS_RX =
+  /\bnote (this|it|that)( down)?\b|note it down|take a note of (this|it|that)|make a note of (this|it|that)/i;
+const DOC_NOUN_RX =
+  /receipt|reciept|recipe|bill\b|invoice|prescription|document|report|warranty|slip|voucher|statement|ticket|certificate|letter|form\b|card\b|ರಸೀದಿ|ಬಿಲ್|ದಾಖಲೆ|रसीद|बिल|पर्च|दस्तावेज|രസീത|ബില്‍|ரசீது|பில்|రసీదు|బిల/i;
+const DEMONSTRATIVE_RX =
+  /\b(this|it|that)\b|photo|picture|pic\b|ಇದ|इस|ये|यह|ഇത|இத|ఇద/i;
+const FACT_MARKER_RX =
+  /\b(is|are|was|were|will|has|have)\b|birthday|meeting|appointment|flight|deadline|anniversary|reminder|remind/i;
+
+function detectSaveDocument(text) {
+  const t = String(text || "").trim();
+  const hasSaveish =
+    SAVE_VERB_RX.test(t) || SCAN_VERB_RX.test(t) || NOTE_THIS_RX.test(t);
+  if (!hasSaveish) return null;
+
+  // "scan this" / "note this down" -> always a capture.
+  const physical =
+    SCAN_VERB_RX.test(t) ||
+    NOTE_THIS_RX.test(t) ||
+    // named a document to keep ("save this receipt")…
+    DOC_NOUN_RX.test(t) ||
+    // …or a short "save/remember this" with a demonstrative and no fact clause.
+    (SAVE_VERB_RX.test(t) &&
+      DEMONSTRATIVE_RX.test(t) &&
+      t.split(/\s+/).filter(Boolean).length <= 5 &&
+      !FACT_MARKER_RX.test(t));
+  if (!physical) return null;
+  return { note: t };
+}
+
 async function runTurn(s, req, userText) {
   s.busy = true;
   s.cancelled = false;
   try {
+    // "Remind me to…" / "remember to…" is a REMINDER for the tool layer, not
+    // a call or a camera capture — even though it contains words like "call"
+    // ("remind me to call the doctor") or "save". Let it flow to the AI.
+    const isReminder = /^\s*(please\s+|hey hari[, ]+|hari[, ]+)*(remind me to|remember to|set a reminder|reminder to)\b/i.test(
+      userText
+    );
+
     // "Call mom and tell her I'll be late" — Hari phones the contact and
     // speaks on the call itself. Contacts live on the DEVICE, so we ask the
     // app to resolve the name first; the agent call is placed in /contacts.
-    const agentReq = detectAgentCall(userText);
+    const agentReq = isReminder ? null : detectAgentCall(userText);
     if (agentReq) {
       s.pendingContactName = agentReq.name;
       s.pendingCallTask = agentReq.task;
@@ -228,13 +273,30 @@ async function runTurn(s, req, userText) {
     }
 
     // "Call amma" — plain direct dial (contacts resolved on the device).
-    const callee = detectCallIntent(userText);
+    const callee = isReminder ? null : detectCallIntent(userText);
     if (callee) {
       s.pendingContactName = callee;
       s.pendingCallTask = null;
       state(s, "finding_contact");
       emit(s, { type: "contact_lookup", name: callee });
       return; // waits for POST /contacts
+    }
+
+    // "Save this receipt" / "scan this" / "remember this" — the app opens the
+    // camera, captures the shot, and files it into document memory. Capture
+    // + upload happen on the DEVICE; we just trigger it and let the app
+    // confirm. A spoken fact ("remember mom's birthday…") falls through.
+    const save = isReminder ? null : detectSaveDocument(userText);
+    if (save) {
+      state(s, "speaking");
+      emit(s, {
+        type: "assistant_message",
+        text: "Sure — show it to the camera and I'll remember it.",
+      });
+      emit(s, { type: "open_camera", note: save.note });
+      state(s, "completed");
+      s.busy = false;
+      return;
     }
 
     state(s, "thinking");
