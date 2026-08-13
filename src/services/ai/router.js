@@ -55,8 +55,52 @@ const TIMEOUT_MS = 30_000;
 
 // Default chat model. NOTE: the gemini-2.5-* family has a published shutdown
 // date of 2026-10-16 — set GEMINI_MODEL to a current model (e.g.
-// gemini-3.6-flash) well before then.
+// gemini-3.5-flash) well before then.
 const DEFAULT_MODEL = "gemini-2.5-flash";
+
+// ---------------- GEMINI 3 TUNING (latency) ----------------
+// Gemini 3 models THINK BY DEFAULT at thinking_level "high". For a
+// conversational voice assistant that is the single biggest source of
+// response delay: the model reasons at length before the first token, while
+// the user sits in silence. Conversation, transcription and short replies
+// need almost no reasoning, so we ask for a low thinking level.
+//
+// "low" is supported by every Gemini 3 model; "minimal" is faster still but
+// only exists on some. Override with GEMINI_THINKING_LEVEL. If the API
+// rejects whatever is configured, we retry once without it (see
+// UNSUPPORTED_FIELDS) so a wrong value can never break the assistant.
+const THINKING_LEVEL = (process.env.GEMINI_THINKING_LEVEL || "low").toUpperCase();
+
+const isGemini3 = (model) => /^gemini-3/i.test(String(model || ""));
+
+/// generationConfig additions that only apply to Gemini 3.
+function tuning(model, extra = {}) {
+  const cfg = { ...extra };
+  if (isGemini3(model) && !UNSUPPORTED_FIELDS.has("thinkingConfig")) {
+    cfg.thinkingConfig = { thinkingLevel: THINKING_LEVEL };
+  }
+  // Gemini 3 deprecated temperature/top_p/top_k; Google explicitly advises
+  // removing them, as low values can cause looping or degraded output.
+  if (isGemini3(model)) {
+    delete cfg.temperature;
+    delete cfg.topP;
+    delete cfg.topK;
+  }
+  return cfg;
+}
+
+// Request fields this deployment's model/API version has rejected. Once a
+// field 400s we stop sending it, so an API change degrades performance
+// rather than breaking the assistant outright.
+const UNSUPPORTED_FIELDS = new Set();
+
+/// True if a 400 looks like "you sent a field I don't understand".
+function rejectsField(status, body, field) {
+  if (status !== 400) return false;
+  const b = String(body || "");
+  return new RegExp(field, "i").test(b) ||
+    /unknown name|invalid json payload|not supported|unrecognized/i.test(b);
+}
 
 // TTS must fail FAST: the app waits on each sentence's audio, and a 30s hang
 // means the user stares at a silent screen. On timeout the app falls back to
@@ -65,10 +109,12 @@ const TTS_TIMEOUT_MS = Number(process.env.GEMINI_TTS_TIMEOUT_MS) || 15_000;
 
 // ---------------- GEMINI ----------------
 
-async function callGemini(messages, system = SYSTEM_PROMPT) {
+async function callGemini(messages, system = SYSTEM_PROMPT, _retry = false) {
   const key = process.env.GEMINI_API_KEY;
   if (!key) throw new Error("gemini: key missing");
   const model = process.env.GEMINI_MODEL || DEFAULT_MODEL;
+
+  const generationConfig = tuning(model);
 
   // Key goes in a header, never the URL — URLs end up in proxy/server logs.
   const r = await fetch(
@@ -86,11 +132,22 @@ async function callGemini(messages, system = SYSTEM_PROMPT) {
           role: m.role === "assistant" ? "model" : "user",
           parts: [{ text: m.content }],
         })),
+        ...(Object.keys(generationConfig).length ? { generationConfig } : {}),
       }),
     }
   );
   if (!r.ok) {
     const body = await r.text().catch(() => "");
+    // A rejected tuning field must never take chat down: drop it and retry.
+    if (!_retry && generationConfig.thinkingConfig &&
+        rejectsField(r.status, body, "thinking")) {
+      UNSUPPORTED_FIELDS.add("thinkingConfig");
+      console.error(
+        `gemini: thinkingLevel "${THINKING_LEVEL}" rejected — continuing ` +
+          `without it (responses will be slower). Set GEMINI_THINKING_LEVEL.`
+      );
+      return callGemini(messages, system, true);
+    }
     throw new Error(`gemini ${r.status} ${body.slice(0, 300)}`);
   }
   const data = await r.json();
@@ -141,6 +198,10 @@ async function* generateReplyStream(messages, opts = {}) {
   const system = opts.system || SYSTEM_PROMPT + (opts.extraSystem || "");
   const model = process.env.GEMINI_MODEL || DEFAULT_MODEL;
 
+  // The streaming path is what the user actually waits on before hearing
+  // Hari speak, so low thinking matters most here.
+  const generationConfig = tuning(model);
+
   const r = await fetch(
     `https://generativelanguage.googleapis.com/v1beta/models/${model}:streamGenerateContent?alt=sse`,
     {
@@ -156,11 +217,22 @@ async function* generateReplyStream(messages, opts = {}) {
           role: m.role === "assistant" ? "model" : "user",
           parts: [{ text: m.content }],
         })),
+        ...(Object.keys(generationConfig).length ? { generationConfig } : {}),
       }),
     }
   );
   if (!r.ok || !r.body) {
     const body = r.ok ? "" : await r.text().catch(() => "");
+    // Drop a rejected tuning field and let the caller's retry/fallback run.
+    if (generationConfig.thinkingConfig && rejectsField(r.status, body, "thinking")) {
+      UNSUPPORTED_FIELDS.add("thinkingConfig");
+      console.error(
+        `gemini stream: thinkingLevel "${THINKING_LEVEL}" rejected — ` +
+          `continuing without it. Set GEMINI_THINKING_LEVEL.`
+      );
+      yield* generateReplyStream(messages, opts);
+      return;
+    }
     throw new Error(`gemini stream ${r.status} ${body.slice(0, 300)}`);
   }
 
@@ -260,7 +332,30 @@ async function transcribeAudio(buffer, mimeType, opts = {}) {
             ],
           },
         ],
-        generationConfig: { temperature: 0, response_mime_type: "application/json" },
+        // Transcription needs no reasoning at all, so thinking is kept low
+        // (a Gemini 3 model would otherwise "think" before transcribing).
+        // temperature is deliberately NOT set on Gemini 3: Google deprecated
+        // it and warns that low values cause looping/degraded output. On
+        // older models we keep temperature 0 for deterministic transcripts.
+        generationConfig: tuning(model, {
+          ...(isGemini3(model) ? {} : { temperature: 0 }),
+          response_mime_type: "application/json",
+          // Structured output: guarantees valid JSON instead of hoping the
+          // model obeys the prompt, so a chatty reply can never be mistaken
+          // for a transcript.
+          ...(UNSUPPORTED_FIELDS.has("responseSchema")
+            ? {}
+            : {
+                response_schema: {
+                  type: "OBJECT",
+                  properties: {
+                    text: { type: "STRING" },
+                    language: { type: "STRING" },
+                  },
+                  required: ["text"],
+                },
+              }),
+        }),
       }),
     }
   );
@@ -279,6 +374,18 @@ async function transcribeAudio(buffer, mimeType, opts = {}) {
         );
       }
       return transcribeAudio(buffer, mimeType, opts);
+    }
+    // A rejected tuning field must never break speech input: remember it,
+    // stop sending it, and retry immediately.
+    for (const [field, probe] of [
+      ["thinkingConfig", "thinking"],
+      ["responseSchema", "schema"],
+    ]) {
+      if (!UNSUPPORTED_FIELDS.has(field) && rejectsField(r.status, body, probe)) {
+        UNSUPPORTED_FIELDS.add(field);
+        console.error(`gemini stt: "${field}" rejected — retrying without it.`);
+        return transcribeAudio(buffer, mimeType, opts);
+      }
     }
     const alt = mt === "audio/mp4" ? "audio/aac" : "audio/mp4";
     if (r.status >= 400 && r.status < 500 && !opts._retried) {
