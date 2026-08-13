@@ -435,6 +435,11 @@ router.post("/:sid/audio", upload.single("audio"), async (req, res) => {
 
   state(s, "transcribing");
   let text = "";
+  // A TECHNICAL failure (model retired, timeout, bad key) is completely
+  // different from the user saying nothing — but both used to produce
+  // "Sorry, I couldn't hear that clearly", which blames the user for a
+  // server problem and tells them nothing useful. Track them separately.
+  let sttError = null;
   try {
     const out = await transcribeAudio(
       req.file.buffer,
@@ -442,16 +447,24 @@ router.post("/:sid/audio", upload.single("audio"), async (req, res) => {
     );
     text = String(out?.text || "").trim();
   } catch (e) {
-    console.error("assistant stt failed:", e.message);
+    sttError = e.message || "unknown error";
+    console.error("assistant stt failed:", sttError);
   }
 
   if (!text) {
-    // Heard nothing usable — say so instead of leaving the app hanging
-    // on "Transcribing…" forever (one of the reported symptoms).
     state(s, "speaking");
+    // Tell the app WHY, so it can stop re-listening into a broken service
+    // and show something actionable instead of repeating itself.
+    emit(s, {
+      type: "transcript_failed",
+      reason: sttError ? "stt_error" : "no_speech",
+      detail: sttError ? String(sttError).slice(0, 200) : undefined,
+    });
     emit(s, {
       type: "assistant_message",
-      text: "Sorry, I couldn't hear that clearly. Could you say it again?",
+      text: sttError
+        ? "My speech service isn't responding right now. Please check the server logs — your microphone is fine."
+        : "Sorry, I couldn't hear that clearly. Could you say it again?",
     });
     state(s, "completed");
     return;
