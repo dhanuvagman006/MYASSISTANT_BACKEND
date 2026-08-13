@@ -12,6 +12,7 @@ if (!process.env.JWT_SECRET || process.env.JWT_SECRET.length < 32) {
 const configRoute = require("./routes/config");
 const chatRoute = require("./routes/chat");
 const sttRoute = require("./routes/stt");
+const ttsRoute = require("./routes/tts");
 const regionRoute = require("./routes/region");
 const authRoute = require("./routes/auth");
 const { appAuth } = require("./middleware/auth");
@@ -169,6 +170,8 @@ app.get("/tools/news", appAuth, async (req, res) => {
 
 // Voice transcription (Gemini) — same auth as chat
 app.use("/stt", appAuth, perUserLimit, sttRoute);
+
+app.use("/tts", appAuth, perUserLimit, ttsRoute);
 
 // Group B — photos, documents, OCR, screenshot helper (Gemini vision).
 app.use("/vision", appAuth, perUserLimit, require("./routes/vision"));

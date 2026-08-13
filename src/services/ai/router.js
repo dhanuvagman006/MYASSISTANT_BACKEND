@@ -259,4 +259,107 @@ async function transcribeAudio(buffer, mimeType, opts = {}) {
   }
 }
 
-module.exports = { generateReply, generateReplyStream, transcribeAudio };
+// ---------------- TEXT-TO-SPEECH (GEMINI NATIVE) ----------------
+// Gemini's TTS models turn text into high-fidelity neural speech using the
+// SAME GEMINI_API_KEY. Output is raw 16-bit PCM (little-endian, mono,
+// 24 kHz) as base64 — we wrap it in a WAV header so the phone can play it
+// with a plain audio player. This replaces the robotic on-device voice.
+
+// Default voices per Gemini TTS: warm, natural, well-suited to an assistant.
+// Full list (30): Kore, Puck, Zephyr, Charon, Leda, Aoede, Callirrhoe, etc.
+const TTS_DEFAULT_VOICE = process.env.GEMINI_TTS_VOICE || "Kore";
+const TTS_MODEL = process.env.GEMINI_TTS_MODEL || "gemini-2.5-flash-preview-tts";
+const TTS_SAMPLE_RATE = 24000;
+
+// Prebuilt Gemini voice names (validated so a bad env/body can't 400 us).
+const TTS_VOICES = new Set([
+  "Zephyr", "Puck", "Charon", "Kore", "Fenrir", "Leda", "Orus", "Aoede",
+  "Callirrhoe", "Autonoe", "Enceladus", "Iapetus", "Umbriel", "Algieba",
+  "Despina", "Erinome", "Algenib", "Rasalgethi", "Laomedeia", "Achernar",
+  "Alnilam", "Schedar", "Gacrux", "Pulcherrimo", "Achird", "Zubenelgenubi",
+  "Vindemiatrix", "Sadachbia", "Sadaltager", "Sulafat",
+]);
+
+// Wrap raw PCM (s16le) in a minimal WAV container so any player accepts it.
+function pcmToWav(pcm, sampleRate = TTS_SAMPLE_RATE, channels = 1, bits = 16) {
+  const byteRate = (sampleRate * channels * bits) / 8;
+  const blockAlign = (channels * bits) / 8;
+  const header = Buffer.alloc(44);
+  header.write("RIFF", 0);
+  header.writeUInt32LE(36 + pcm.length, 4);
+  header.write("WAVE", 8);
+  header.write("fmt ", 12);
+  header.writeUInt32LE(16, 16); // PCM chunk size
+  header.writeUInt16LE(1, 20); // audio format = PCM
+  header.writeUInt16LE(channels, 22);
+  header.writeUInt32LE(sampleRate, 24);
+  header.writeUInt32LE(byteRate, 28);
+  header.writeUInt16LE(blockAlign, 32);
+  header.writeUInt16LE(bits, 34);
+  header.write("data", 36);
+  header.writeUInt32LE(pcm.length, 40);
+  return Buffer.concat([header, pcm]);
+}
+
+/**
+ * Synthesize [text] to speech. Returns a WAV Buffer (24 kHz mono PCM).
+ * [opts.voice] overrides the default voice; [opts.language] biases accent.
+ */
+async function synthesizeSpeech(text, opts = {}) {
+  const key = requireKey();
+  const clean = String(text || "").trim();
+  if (!clean) throw new Error("tts: empty text");
+
+  const voice = TTS_VOICES.has(opts.voice) ? opts.voice : TTS_DEFAULT_VOICE;
+
+  // A light style prompt makes the assistant sound warm and unhurried
+  // instead of flat. The model needs an instruction verb ("Say"), else it
+  // may stay silent.
+  const prompt = `Say warmly and naturally, at a calm conversational pace: ${clean}`;
+
+  const speechConfig = {
+    voiceConfig: { prebuiltVoiceConfig: { voiceName: voice } },
+  };
+  // A 2-letter code lets Gemini pick the right accent (e.g. "kn", "hi").
+  if (typeof opts.language === "string" && /^[a-z]{2}$/i.test(opts.language)) {
+    speechConfig.languageCode = opts.language.toLowerCase();
+  }
+
+  const r = await fetch(
+    `https://generativelanguage.googleapis.com/v1beta/models/${TTS_MODEL}:generateContent`,
+    {
+      method: "POST",
+      headers: { "content-type": "application/json", "x-goog-api-key": key },
+      signal: AbortSignal.timeout(TIMEOUT_MS),
+      body: JSON.stringify({
+        contents: [{ role: "user", parts: [{ text: prompt }] }],
+        generationConfig: { responseModalities: ["AUDIO"], speechConfig },
+      }),
+    }
+  );
+  if (!r.ok) {
+    const body = await r.text().catch(() => "");
+    throw new Error(`gemini tts ${r.status} ${body.slice(0, 300)}`);
+  }
+  const data = await r.json();
+  const part = data.candidates?.[0]?.content?.parts?.find(
+    (p) => p.inlineData?.data
+  );
+  const b64 = part?.inlineData?.data;
+  if (!b64) throw new Error("gemini tts: no audio returned");
+
+  // Gemini reports the rate in the mime type (e.g. "audio/L16;rate=24000").
+  const mime = part.inlineData.mimeType || "";
+  const rateMatch = /rate=(\d+)/.exec(mime);
+  const rate = rateMatch ? parseInt(rateMatch[1], 10) : TTS_SAMPLE_RATE;
+
+  const pcm = Buffer.from(b64, "base64");
+  return { wav: pcmToWav(pcm, rate), voice, sampleRate: rate };
+}
+
+module.exports = {
+  generateReply,
+  generateReplyStream,
+  transcribeAudio,
+  synthesizeSpeech,
+};
