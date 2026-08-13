@@ -453,22 +453,30 @@ router.post("/:sid/audio", upload.single("audio"), async (req, res) => {
 
   if (!text) {
     state(s, "speaking");
-    // Tell the app WHY, so it can stop re-listening into a broken service
-    // and show something actionable instead of repeating itself.
+    // Tell the app WHY, so it can react correctly instead of repeating
+    // itself. On an stt_error the app silently resends the same clip once —
+    // so the FIRST failure must not speak an error at the user; only a
+    // repeat failure gets a spoken message (and an honest one: the service
+    // is down, their microphone is fine).
+    const firstSttFailure = sttError && !s.sttFailedOnce;
+    if (sttError) s.sttFailedOnce = true;
     emit(s, {
       type: "transcript_failed",
       reason: sttError ? "stt_error" : "no_speech",
       detail: sttError ? String(sttError).slice(0, 200) : undefined,
     });
-    emit(s, {
-      type: "assistant_message",
-      text: sttError
-        ? "My speech service isn't responding right now. Please check the server logs — your microphone is fine."
-        : "Sorry, I couldn't hear that clearly. Could you say it again?",
-    });
+    if (!firstSttFailure) {
+      emit(s, {
+        type: "assistant_message",
+        text: sttError
+          ? "My speech service isn't responding right now. Please check the server logs — your microphone is fine."
+          : "Sorry, I couldn't hear that clearly. Could you say it again?",
+      });
+    }
     state(s, "completed");
     return;
   }
+  s.sttFailedOnce = false;
 
   emit(s, { type: "user_transcript", text });
   await runTurn(s, req, text);

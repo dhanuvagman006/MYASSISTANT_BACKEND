@@ -147,10 +147,16 @@ function rejectsField(status, body, field) {
     /unknown name|invalid json payload|not supported|unrecognized/i.test(b);
 }
 
-// TTS must fail FAST: the app waits on each sentence's audio, and a 30s hang
-// means the user stares at a silent screen. On timeout the app falls back to
-// the on-device voice, which is far better than nothing.
-const TTS_TIMEOUT_MS = Number(process.env.GEMINI_TTS_TIMEOUT_MS) || 15_000;
+// TTS must fail FAST, and the math has to respect the CLIENT: the app gives
+// up on /tts after 20s, so the server budget for (attempt + backoff +
+// attempt) must fit inside that or a slow synthesis wastes the whole wait
+// and the user hears nothing. Per-attempt cap 9s: 9 + 0.7 + 9 = 18.7s < 20s.
+// Env values above the cap are clamped, not honoured — a 25s setting would
+// otherwise guarantee the client aborts first.
+const TTS_TIMEOUT_MS = Math.min(
+  Number(process.env.GEMINI_TTS_TIMEOUT_MS) || 9_000,
+  9_000
+);
 
 // ---------------- GEMINI ----------------
 
@@ -337,6 +343,17 @@ function looksRetired(status) {
   return status === 404;
 }
 
+/// True for failures that are worth retrying: upstream congestion (503/429)
+/// or our own request timeout. These are moments, not states — one 503 must
+/// never surface to the user as a failed turn.
+function isTransient(status, err) {
+  if (status === 503 || status === 429) return true;
+  const m = String(err?.message || err || "");
+  return err?.name === "TimeoutError" || /timeout|aborted/i.test(m);
+}
+
+const sleep = (ms) => new Promise((res) => setTimeout(res, ms));
+
 async function transcribeAudio(buffer, mimeType, opts = {}) {
   const key = requireKey();
   // STT is an easy task for the model, so a lighter/faster model can cut
@@ -364,17 +381,26 @@ async function transcribeAudio(buffer, mimeType, opts = {}) {
     instruction += ` The speaker is most likely speaking language code "${opts.hint}", but transcribe whatever language is actually spoken.`;
   }
 
-  const r = await fetch(
-    `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent`,
-    {
-      method: "POST",
-      headers: {
-        "content-type": "application/json",
-        "x-goog-api-key": key,
-      },
-      signal: AbortSignal.timeout(TIMEOUT_MS),
-      body: JSON.stringify({
-        contents: [
+  // TRANSIENT RESILIENCE. Google's shared endpoint 503s under load and a
+  // single mic clip is small — three attempts with a short per-attempt
+  // timeout still finishes fast, and absorbs the "high demand" blips that
+  // were reaching the user as "I couldn't hear that". Per-attempt timeout is
+  // 12s so worst case (3 attempts + backoff) stays inside the app's patience.
+  const STT_ATTEMPT_TIMEOUT = 10_000;
+  let r;
+  for (let attempt = 0; ; attempt++) {
+    try {
+      r = await fetch(
+        `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent`,
+        {
+          method: "POST",
+          headers: {
+            "content-type": "application/json",
+            "x-goog-api-key": key,
+          },
+          signal: AbortSignal.timeout(STT_ATTEMPT_TIMEOUT),
+          body: JSON.stringify({
+            contents: [
           {
             role: "user",
             parts: [
@@ -407,9 +433,24 @@ async function transcribeAudio(buffer, mimeType, opts = {}) {
                 },
               }),
         }),
-      }),
+          }),
+        }
+      );
+    } catch (e) {
+      if (attempt < 2 && isTransient(0, e)) {
+        console.warn(`gemini stt attempt ${attempt + 1} ${e.name || "error"} — retrying`);
+        await sleep(500 * (attempt + 1));
+        continue;
+      }
+      throw e;
     }
-  );
+    if (!r.ok && attempt < 2 && isTransient(r.status)) {
+      console.warn(`gemini stt attempt ${attempt + 1} got ${r.status} — retrying`);
+      await sleep(500 * (attempt + 1));
+      continue;
+    }
+    break;
+  }
   if (!r.ok) {
     const body = await r.text().catch(() => "");
     // 404 = this model name is unusable for this key. Remember it and retry
@@ -530,18 +571,28 @@ async function synthesizeSpeech(text, opts = {}) {
     speechConfig.languageCode = opts.language.toLowerCase();
   }
 
-  const r = await fetch(
-    `https://generativelanguage.googleapis.com/v1beta/models/${TTS_MODEL}:generateContent`,
-    {
-      method: "POST",
-      headers: { "content-type": "application/json", "x-goog-api-key": key },
-      signal: AbortSignal.timeout(TTS_TIMEOUT_MS),
-      body: JSON.stringify({
-        contents: [{ role: "user", parts: [{ text: prompt }] }],
-        generationConfig: { responseModalities: ["AUDIO"], speechConfig },
-      }),
+  let r;
+  try {
+    r = await fetch(
+      `https://generativelanguage.googleapis.com/v1beta/models/${TTS_MODEL}:generateContent`,
+      {
+        method: "POST",
+        headers: { "content-type": "application/json", "x-goog-api-key": key },
+        signal: AbortSignal.timeout(TTS_TIMEOUT_MS),
+        body: JSON.stringify({
+          contents: [{ role: "user", parts: [{ text: prompt }] }],
+          generationConfig: { responseModalities: ["AUDIO"], speechConfig },
+        }),
+      }
+    );
+  } catch (e) {
+    // Timeouts are as transient as 503s here — one quick retry.
+    if (!opts._retried && isTransient(0, e)) {
+      await sleep(700);
+      return synthesizeSpeech(text, { ...opts, _retried: true });
     }
-  );
+    throw e;
+  }
   if (!r.ok) {
     const body = await r.text().catch(() => "");
     // 503 "high demand" / 429 are TRANSIENT: the model is busy, not broken.
