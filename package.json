@@ -1,7 +1,7 @@
 {
   "name": "myassistant-backend",
   "version": "0.1.0",
-  "description": "MYASSISTANT backend \u2014 AI routing, remote config, user services",
+  "description": "MYASSISTANT backend — AI routing, remote config, user services",
   "main": "src/server.js",
   "scripts": {
     "start": "node src/server.js",
@@ -25,6 +25,7 @@
     "jose": "^6.2.3",
     "jsonwebtoken": "^9.0.3",
     "multer": "^2.2.0",
-    "pg": "^8.22.0"
+    "pg": "^8.22.0",
+    "ws": "^8.21.3"
   }
 }

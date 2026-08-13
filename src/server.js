@@ -199,6 +199,12 @@ app.use("/places", appAuth, require("./routes/places"));
 // Regional language from the caller's IP (no app permissions needed)
 app.use("/region", regionRoute);
 
+// LIVE MODE (experimental): the probe route must register BEFORE the JSON
+// 404 catch-all below, or /live would always 404; the WS upgrade handler is
+// attached to the HTTP server after listen because it needs that handle.
+const live = require("./live/proxy");
+app.use("/live", live.probeRouter());
+
 // JSON 404 for unmatched routes (instead of Express's default HTML page)
 app.use((_req, res) => res.status(404).json({ error: "not found" }));
 
@@ -218,7 +224,7 @@ const port = process.env.PORT || 3000;
 require("./db")
   .init()
   .then(() => {
-    app.listen(port, () => {
+    const server = app.listen(port, () => {
       console.log(`MYASSISTANT backend on :${port} (postgres ready)`);
       // A key defined TWICE in .env silently keeps the LAST value, which is
       // a brutal way to lose an afternoon: the file looks right at a glance
@@ -260,6 +266,11 @@ require("./db")
         );
       }
     });
+    // LIVE MODE: attach the /live/ws upgrade handler to the running server.
+    live.attachWs(server);
+    console.log(
+      `  live mode: model=${process.env.GEMINI_LIVE_MODEL || "gemini-2.5-flash-native-audio-preview"} at /live/ws (experimental)`
+    );
   })
   .catch((e) => {
     console.error("FATAL: could not initialize Postgres:", e.message);
