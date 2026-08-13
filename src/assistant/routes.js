@@ -35,6 +35,7 @@ const multer = require("multer");
 const { transcribeAudio } = require("../services/ai/router");
 const { buildToolContext } = require("../services/intents");
 const { runAgentTurn } = require("../agents/orchestrator");
+const agentCall = require("../agents/agentCall");
 
 const upload = multer({
   storage: multer.memoryStorage(),
@@ -51,11 +52,12 @@ const MAX_BUFFER = 300; // replay buffer per session
 /** sid -> session */
 const sessions = new Map();
 
-function newSession(userSub) {
+function newSession(userSub, userName) {
   const sid = crypto.randomUUID();
   const s = {
     sid,
     userSub: userSub || null,
+    userName: userName || null,
     streamToken: crypto.randomBytes(24).toString("hex"),
     createdAt: Date.now(),
     lastSeen: Date.now(),
@@ -67,6 +69,8 @@ function newSession(userSub) {
     cancelled: false,
     pending: null, // { action, contact } awaiting confirm
     pendingContactName: null, // waiting for device contact matches
+    pendingCallTask: null, // agent-call task ("tell her I'll be late")
+    agentRetries: 0, // retries used on the current agent-call request
   };
   sessions.set(sid, s);
   return s;
@@ -120,7 +124,7 @@ const state = (s, name) => emit(s, { type: "assistant_state", state: name });
 
 // POST /assistant/session  (mounted behind appAuth in server.js)
 router.post("/session", (req, res) => {
-  const s = newSession(req.user?.sub);
+  const s = newSession(req.user?.sub, req.user?.name);
   res.json({ sessionId: s.sid, streamToken: s.streamToken });
 });
 
@@ -173,6 +177,32 @@ function streamHandler(req, res) {
 const CALL_RX =
   /\b(?:call|phone|dial|ring)\s+(?:up\s+)?([\p{L}\p{M}][\p{L}\p{M} .'-]{0,40})/iu;
 
+// "call X and tell/ask/inform … <message or question>": Hari places the call
+// itself, speaks on it, and reports back — vs a plain "call X" direct dial.
+const AGENT_CALL_RX =
+  /\b(?:call|phone|dial|ring)\s+(?:up\s+)?([\p{L}\p{M}][\p{L}\p{M} .'-]{0,40}?)\s+(?:and|to)\s+((?:ask|tell|inform|say|find out|let|remind|check|confirm)\b.*)$/iu;
+
+function cleanName(raw) {
+  return String(raw || "")
+    .replace(/\b(please|now|for me)\b.*$/i, "")
+    .replace(/^(my|the)\s+/i, "")
+    .trim();
+}
+
+function detectAgentCall(text) {
+  const m = AGENT_CALL_RX.exec(text);
+  if (!m) return null;
+  const name = cleanName(m[1]);
+  let task = String(m[2] || "").trim();
+  if (name.length < 2 || task.length < 3) return null;
+  // "tell her …" → "tell <name> …" so the call AI has full context.
+  task = task.replace(
+    /^(ask|tell|inform|let|say to|confirm with|remind)\s+(him|her|them)\b/i,
+    (_all, verb) => `${verb} ${name}`
+  );
+  return { name, task };
+}
+
 function detectCallIntent(text) {
   const m = CALL_RX.exec(text);
   if (!m) return null;
@@ -184,11 +214,24 @@ async function runTurn(s, req, userText) {
   s.busy = true;
   s.cancelled = false;
   try {
-    // "Call amma" — contacts live on the DEVICE, so ask the app to
-    // resolve the name; the flow continues in /contacts below.
+    // "Call mom and tell her I'll be late" — Hari phones the contact and
+    // speaks on the call itself. Contacts live on the DEVICE, so we ask the
+    // app to resolve the name first; the agent call is placed in /contacts.
+    const agentReq = detectAgentCall(userText);
+    if (agentReq) {
+      s.pendingContactName = agentReq.name;
+      s.pendingCallTask = agentReq.task;
+      s.agentRetries = 0;
+      state(s, "finding_contact");
+      emit(s, { type: "contact_lookup", name: agentReq.name });
+      return; // waits for POST /contacts
+    }
+
+    // "Call amma" — plain direct dial (contacts resolved on the device).
     const callee = detectCallIntent(userText);
     if (callee) {
       s.pendingContactName = callee;
+      s.pendingCallTask = null;
       state(s, "finding_contact");
       emit(s, { type: "contact_lookup", name: callee });
       return; // waits for POST /contacts
@@ -355,9 +398,15 @@ router.post("/:sid/contacts", (req, res) => {
       text: `I couldn't find ${name} in your contacts.`,
     });
     state(s, "completed");
+    s.pendingCallTask = null;
     return;
   }
-  if (matches.length === 1) return askCallConfirm(s, matches[0]);
+  if (matches.length === 1) {
+    // An agent-call task pending? Hari places the call itself and reports
+    // back. Otherwise it's a plain direct-dial confirmation.
+    if (s.pendingCallTask) return startAgentCall(s, matches[0], s.pendingCallTask, req);
+    return askCallConfirm(s, matches[0]);
+  }
   s.ambiguous = matches.slice(0, 6);
   emit(s, { type: "contacts_ambiguous", matches: s.ambiguous });
   state(s, "waiting_for_confirmation");
@@ -375,6 +424,129 @@ function askCallConfirm(s, contact) {
   state(s, "waiting_for_confirmation");
 }
 
+// AGENT CALL — Hari phones [contact], speaks the [task] on the call, and
+// reports the outcome back. Placed and polled server-side; the app just
+// hears the narration and the result through the normal SSE events, so it
+// needs no new UI. Auto-proceeds (the user asked for it); a "no answer"
+// offers one retry via the normal confirmation card.
+async function startAgentCall(s, contact, task, req) {
+  try {
+    s.pendingCallTask = null;
+    const name = contact.name || "them";
+    const number = contact.phone || contact.number || "";
+
+    // Telephony not configured → fall back to a plain direct-dial so the
+    // user's need is still met (they talk to the contact themselves).
+    if (!agentCall.enabled() || !number) {
+      emit(s, {
+        type: "assistant_message",
+        text: `I can't place that call myself on this setup, so I'll connect you to ${name} directly.`,
+      });
+      return askCallConfirm(s, contact);
+    }
+
+    emit(s, { type: "contact_found", contact });
+    state(s, "speaking");
+    emit(s, {
+      type: "assistant_message",
+      text: `Okay, calling ${name} now — I'll speak with them and tell you what happens.`,
+    });
+
+    let id;
+    try {
+      const out = await agentCall.start({
+        userId: Number(s.userSub) > 0 ? Number(s.userSub) : null,
+        userName: s.userName ? String(s.userName).split(" ")[0] : null,
+        toNumber: number,
+        contactName: name,
+        task,
+        lang: null,
+      });
+      id = out.id;
+    } catch (e) {
+      if (e?.code === "quota") {
+        state(s, "speaking");
+        emit(s, {
+          type: "assistant_message",
+          text: `You've reached today's limit for calls I place for you. I'll connect you to ${name} directly instead.`,
+        });
+        return askCallConfirm(s, contact);
+      }
+      state(s, "speaking");
+      emit(s, {
+        type: "assistant_message",
+        text: `Sorry, I couldn't start the call to ${name} just now.`,
+      });
+      state(s, "completed");
+      return;
+    }
+
+    emit(s, { type: "call_status", status: "dialing", contact_name: name });
+    state(s, "in_call");
+
+    // Poll the in-process call store until it reaches a terminal state.
+    const deadline = Date.now() + 3 * 60 * 1000;
+    let terminal = null;
+    let result = null;
+    while (Date.now() < deadline) {
+      await new Promise((r) => setTimeout(r, 3000));
+      if (s.cancelled) return;
+      const st = agentCall.status(id);
+      if (!st) break;
+      if (st.state === "completed" || st.state === "no_answer" || st.state === "failed") {
+        terminal = st.state;
+        result = st.result;
+        break;
+      }
+    }
+
+    emit(s, { type: "call_status", status: terminal || "ended", contact_name: name });
+
+    // No answer → offer ONE retry through the normal confirmation card.
+    if (terminal === "no_answer" && (s.agentRetries || 0) < 1) {
+      s.pending = { action: "agent_call_retry", contact, task };
+      state(s, "speaking");
+      emit(s, {
+        type: "assistant_message",
+        text: result || `${name} didn't pick up.`,
+      });
+      emit(s, {
+        type: "confirmation_request",
+        action: "agent_call_retry",
+        contact,
+        question: `Try calling ${name} again?`,
+      });
+      state(s, "waiting_for_confirmation");
+      return;
+    }
+
+    state(s, "speaking");
+    emit(s, {
+      type: "assistant_message",
+      text:
+        result ||
+        (terminal === "no_answer"
+          ? `${name} still isn't picking up. I'll leave it for now.`
+          : `I couldn't complete the call to ${name}.`),
+    });
+    s.history.push({
+      role: "assistant",
+      content: result || `Call to ${name} ended.`,
+    });
+    state(s, "completed");
+  } catch (err) {
+    console.error("startAgentCall error:", err.message || err);
+    try {
+      state(s, "speaking");
+      emit(s, {
+        type: "assistant_message",
+        text: "Sorry, something went wrong with that call.",
+      });
+      state(s, "completed");
+    } catch (_) {}
+  }
+}
+
 // POST /assistant/:sid/choose — pick from the ambiguous list.
 router.post("/:sid/choose", (req, res) => {
   const s = getSession(req, res);
@@ -385,7 +557,10 @@ router.post("/:sid/choose", (req, res) => {
   // showed a moment ago.
   const chosen = (s.ambiguous || []).find((m) => String(m.id) === id);
   s.ambiguous = null;
-  if (chosen) return askCallConfirm(s, chosen);
+  if (chosen) {
+    if (s.pendingCallTask) return startAgentCall(s, chosen, s.pendingCallTask, req);
+    return askCallConfirm(s, chosen);
+  }
   state(s, "speaking");
   emit(s, {
     type: "assistant_message",
@@ -423,6 +598,15 @@ router.post("/:sid/confirm", (req, res) => {
     });
     state(s, "in_call");
     state(s, "completed");
+    return;
+  }
+
+  if (pending.action === "agent_call_retry") {
+    // Retry a no-answer agent call. Bounded by s.agentRetries so it can't
+    // loop. The reply already goes through startAgentCall's own narration.
+    s.agentRetries = (s.agentRetries || 0) + 1;
+    startAgentCall(s, pending.contact, pending.task, req);
+    return;
   }
 });
 
