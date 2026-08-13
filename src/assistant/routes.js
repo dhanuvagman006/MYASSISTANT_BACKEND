@@ -451,6 +451,21 @@ router.post("/:sid/audio", upload.single("audio"), async (req, res) => {
     console.error("assistant stt failed:", sttError);
   }
 
+  // NOISE / HALLUCINATION GUARD. This route previously skipped the
+  // sanitizer used by /stt, so background sound could come back as a
+  // "transcript" and be treated as the user's words — a clip of room noise
+  // was transcribed as "00:00" and the assistant asked what to do with
+  // "zero zero zero zero". Two filters:
+  //  1. the shared sanitizer (YouTube-filler phrases, looping detection)
+  //  2. a transcript with NO letters in ANY script ("00:00", "...", "!!")
+  //     is noise, not speech — every real utterance contains letters.
+  const { sanitizeTranscript } = require("../routes/stt");
+  text = sanitizeTranscript(text);
+  if (text && !/\p{L}/u.test(text)) {
+    console.warn(`assistant stt: dropping letterless transcript "${text}" as noise`);
+    text = "";
+  }
+
   if (!text) {
     state(s, "speaking");
     // Tell the app WHY, so it can react correctly instead of repeating

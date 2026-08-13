@@ -76,3 +76,6 @@ router.post("/", upload.single("audio"), async (req, res) => {
 });
 
 module.exports = router;
+// Shared with the assistant voice loop so BOTH audio paths reject
+// hallucinated / noise transcripts, not just the raw /stt endpoint.
+module.exports.sanitizeTranscript = sanitizeTranscript;
