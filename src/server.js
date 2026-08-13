@@ -108,6 +108,14 @@ const perUserLimit = rateLimit({
   keyGenerator: (req) => String(req.user?.sub || req.ip),
 });
 
+// AGENT CALLS — Hari phones a contact and reports back.
+// Plivo webhooks are PUBLIC (Plivo can't send our app key); they are guarded
+// by a per-call token embedded in the path and MUST be mounted before the
+// app-facing routes so they don't hit appAuth.
+const agentCall = require("./routes/agentCall");
+app.use("/agent-call/plivo", agentCall.webhooks);
+app.use("/agent-call", appAuth, perUserLimit, agentCall.router);
+
 // Chat requires the app key so strangers can't burn your AI credits.
 // Order: authenticate → per-user throttle → plan allowance → handler.
 app.use("/chat", appAuth, perUserLimit, chatRoute);

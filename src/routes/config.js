@@ -1,6 +1,7 @@
 const router = require("express").Router();
 const remoteConfig = require("../config/remoteConfig");
 const appUpdate = require("./appUpdate");
+const agentCall = require("../agents/agentCall");
 
 // Static switchboard (feature flags, announcements) merged with the
 // dynamically uploaded APK metadata — an APK published via POST /admin/apk
@@ -11,6 +12,12 @@ router.get("/", (_req, res) => {
   const base = (process.env.PUBLIC_BASE_URL || "").replace(/\/$/, "");
   res.json({
     ...remoteConfig,
+    // agent_calls is available whenever telephony is actually configured,
+    // regardless of the static default — no redeploy needed to switch it on.
+    features: {
+      ...remoteConfig.features,
+      agent_calls: agentCall.enabled(),
+    },
     ...(apk && {
       latestVersionCode: apk.versionCode,
       latestVersionName: apk.versionName,
