@@ -5,7 +5,8 @@ personal AI assistant (Flutter app in the `MYASSISTANT` repo). All AI provider
 keys live here, never in the app: the app only ever carries the user's own JWT.
 
 - **Runtime:** Node 20+ · Express 4 · PostgreSQL (via `pg`)
-- **AI:** Gemini (chat, streaming, vision, STT) through `src/services/ai/router.js`
+- **AI:** Gemini (chat, streaming, vision, STT, **neural TTS**) through `src/services/ai/router.js`
+- **Telephony:** Plivo — agent calls Hari places, speaks on, and hangs up herself
 - **Realtime:** the voice loop runs over Server-Sent Events (`/assistant/*`)
 - **Ops:** Helmet, per-IP + per-user rate limits, Prometheus metrics, Docker + k8s
 
@@ -30,6 +31,9 @@ Auth column: **none** = public · **JWT** = `Authorization: Bearer <token>` from
 | `POST /chat` | JWT | AI chat — `{messages:[…]}` → `{reply, sources, documents}` |
 | `POST /assistant/session` · `GET /assistant/stream/:sid` · `POST /assistant/:sid/*` | JWT | Realtime voice loop (SSE + mic/text/contacts/confirm) |
 | `POST /stt` | JWT | Speech-to-text (Gemini Whisper-style) |
+| `POST /tts` | JWT | Text-to-speech — `{text, language?, voice?}` → `audio/wav` (Gemini neural voice) |
+| `POST /agent-call/preview` · `POST /agent-call` · `GET /agent-call/:id` | JWT | Agent calls — Hari places + speaks on + reports a call (Plivo) |
+| `POST /agent-call/plivo/:id/:token/*` | none | Plivo call webhooks (answer/gather/hangup; per-call token in the path) |
 | `POST /vision` | JWT | Photo/PDF understanding (Gemini vision) |
 | `GET/POST/PATCH/DELETE /docs` · `GET /docs/:id/file` | JWT | Saved documents — recall + the original file bytes |
 | `GET/POST/PATCH/DELETE /clients` + `/clients/:id/notes` + `/clients/:id/docs/:docId` | JWT | **Professional mode** — per-patient/client case files |
@@ -58,6 +62,24 @@ data block the AI must answer from. It also powers:
   "note for patient Ramesh: allergic to penicillin" writes a dated note
   (auto-creating the card on first mention); ambiguous names ask which person.
 
+### Agent calls & voice-driven capture
+The `/assistant` loop (`src/assistant/routes.js`) detects two more spoken
+intents and drives them end-to-end; the app just renders the streamed events:
+
+- **Agent calls** — "call mom and tell her I'll be late" / "call the clinic and
+  ask when I can come in". The device resolves the contact, then the server
+  places the call via **Plivo** (`src/agents/agentCall.js`): it generates a
+  natural, per-language script, speaks it with an Amazon Polly voice, captures
+  the reply for "ask" tasks, and hangs up itself. Progress and the spoken
+  outcome stream back over SSE. It auto-proceeds (announces first), offers one
+  retry on no-answer, and returns **503** when telephony is unset so the app
+  falls back to a plain direct dial. Reminder phrasing ("remind me to call …")
+  is never mistaken for a call.
+- **Voice document capture** — "save this receipt", "scan this", "remember
+  this" emit an `open_camera` event; the app opens the camera, files the shot
+  into document memory with the user's words as the note, and confirms. A
+  spoken *fact* ("remember that mom's birthday is in May") is left for the AI.
+
 ## The update switchboard
 `src/config/remoteConfig.js` controls what every installed app sees on launch:
 feature flags, announcements, version prompts, and the OTA APK url/hash. Edit +
@@ -85,6 +107,10 @@ and AI, so they need no Postgres and no keys.
 Required: `DATABASE_URL`, `JWT_SECRET`, `GEMINI_API_KEY`.
 Common: `PORT`, `DATA_DIR` (where document files live), `GEMINI_MODEL`,
 `GEMINI_VISION_MODEL`, `CORS_ORIGIN`, `PG_POOL_SIZE`, `PUBLIC_BASE_URL`.
+Voice: `GEMINI_TTS_MODEL`, `GEMINI_TTS_VOICE` (neural TTS; reuse the Gemini key).
+Agent calls (Plivo — feature returns 503 until all set): `PLIVO_AUTH_ID`,
+`PLIVO_AUTH_TOKEN`, `PLIVO_FROM_NUMBER`, `PUBLIC_BASE_URL` (Plivo must reach it
+for call webhooks), `PLIVO_VOICE` (default `Polly.Aditi`), `AGENT_CALL_DAILY_LIMIT`.
 Auth/dev: `ALLOW_APP_KEY`, `APP_API_KEY`, `AUTH_DISABLED` (dev only — the
 server refuses to boot with this in production), `GOOGLE_WEB_CLIENT_ID`,
 `GOOGLE_WEB_CLIENT_SECRET`, `APPLE_BUNDLE_ID`.
