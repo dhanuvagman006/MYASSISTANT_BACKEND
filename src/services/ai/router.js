@@ -53,12 +53,22 @@ const SYSTEM_PROMPT =
 
 const TIMEOUT_MS = 30_000;
 
+// Default chat model. NOTE: the gemini-2.5-* family has a published shutdown
+// date of 2026-10-16 — set GEMINI_MODEL to a current model (e.g.
+// gemini-3.6-flash) well before then.
+const DEFAULT_MODEL = "gemini-2.5-flash";
+
+// TTS must fail FAST: the app waits on each sentence's audio, and a 30s hang
+// means the user stares at a silent screen. On timeout the app falls back to
+// the on-device voice, which is far better than nothing.
+const TTS_TIMEOUT_MS = Number(process.env.GEMINI_TTS_TIMEOUT_MS) || 15_000;
+
 // ---------------- GEMINI ----------------
 
 async function callGemini(messages, system = SYSTEM_PROMPT) {
   const key = process.env.GEMINI_API_KEY;
   if (!key) throw new Error("gemini: key missing");
-  const model = process.env.GEMINI_MODEL || "gemini-2.5-flash";
+  const model = process.env.GEMINI_MODEL || DEFAULT_MODEL;
 
   // Key goes in a header, never the URL — URLs end up in proxy/server logs.
   const r = await fetch(
@@ -129,7 +139,7 @@ async function generateReply(messages, opts = {}) {
 async function* generateReplyStream(messages, opts = {}) {
   const key = requireKey();
   const system = opts.system || SYSTEM_PROMPT + (opts.extraSystem || "");
-  const model = process.env.GEMINI_MODEL || "gemini-2.5-flash";
+  const model = process.env.GEMINI_MODEL || DEFAULT_MODEL;
 
   const r = await fetch(
     `https://generativelanguage.googleapis.com/v1beta/models/${model}:streamGenerateContent?alt=sse`,
@@ -191,16 +201,28 @@ async function* generateReplyStream(messages, opts = {}) {
  * @param {Object} [opts] { language?: "kn", hint?: "kn" } ISO-639-1
  * @returns {Promise<{text:string, language:string}>}
  */
+// Models that returned "not found / no longer available". A retired model
+// would otherwise 404 on EVERY request, silently killing the voice loop
+// (the app just says "I couldn't hear that"). We remember the bad name and
+// fall back to the main chat model from then on.
+const DEAD_MODELS = new Set();
+
+function looksRetired(status, body) {
+  if (status !== 404) return false;
+  return /not found|no longer available|not supported|is not available/i.test(
+    String(body || "")
+  );
+}
+
 async function transcribeAudio(buffer, mimeType, opts = {}) {
   const key = requireKey();
   // STT is an easy task for the model, so a lighter/faster model can cut
   // transcription latency noticeably. Override with GEMINI_STT_MODEL (e.g.
-  // "gemini-2.5-flash-lite") without touching chat quality; defaults to the
+  // "gemini-3.5-flash-lite") without touching chat quality; defaults to the
   // main chat model so existing deploys are unchanged.
-  const model =
-    process.env.GEMINI_STT_MODEL ||
-    process.env.GEMINI_MODEL ||
-    "gemini-2.5-flash";
+  const mainModel = process.env.GEMINI_MODEL || DEFAULT_MODEL;
+  const wanted = process.env.GEMINI_STT_MODEL || mainModel;
+  const model = DEAD_MODELS.has(wanted) ? mainModel : wanted;
   // The app records .m4a (AAC in an MP4 container). Normalize the label,
   // and keep a fallback: some Gemini deployments accept audio/mp4 but not
   // audio/aac, others the reverse — a 4xx triggers ONE retry with the
@@ -244,6 +266,20 @@ async function transcribeAudio(buffer, mimeType, opts = {}) {
   );
   if (!r.ok) {
     const body = await r.text().catch(() => "");
+    // The configured STT model has been retired (Google returns 404). Don't
+    // let that break speech input: remember it, and immediately retry on the
+    // main chat model. Without this the app reports "I couldn't hear that"
+    // on every single turn while the mic is working perfectly.
+    if (looksRetired(r.status, body) && model !== mainModel) {
+      if (!DEAD_MODELS.has(model)) {
+        DEAD_MODELS.add(model);
+        console.error(
+          `gemini stt: model "${model}" is retired — falling back to ` +
+            `"${mainModel}". Update GEMINI_STT_MODEL in your .env.`
+        );
+      }
+      return transcribeAudio(buffer, mimeType, opts);
+    }
     const alt = mt === "audio/mp4" ? "audio/aac" : "audio/mp4";
     if (r.status >= 400 && r.status < 500 && !opts._retried) {
       console.warn(`gemini stt ${r.status} with ${mt} — retrying as ${alt}:`, body.slice(0, 200));
@@ -337,7 +373,7 @@ async function synthesizeSpeech(text, opts = {}) {
     {
       method: "POST",
       headers: { "content-type": "application/json", "x-goog-api-key": key },
-      signal: AbortSignal.timeout(TIMEOUT_MS),
+      signal: AbortSignal.timeout(TTS_TIMEOUT_MS),
       body: JSON.stringify({
         contents: [{ role: "user", parts: [{ text: prompt }] }],
         generationConfig: { responseModalities: ["AUDIO"], speechConfig },
