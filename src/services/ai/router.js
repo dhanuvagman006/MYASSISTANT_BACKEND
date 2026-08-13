@@ -69,9 +69,36 @@ const DEFAULT_MODEL = "gemini-2.5-flash";
 // only exists on some. Override with GEMINI_THINKING_LEVEL. If the API
 // rejects whatever is configured, we retry once without it (see
 // UNSUPPORTED_FIELDS) so a wrong value can never break the assistant.
-const THINKING_LEVEL = (process.env.GEMINI_THINKING_LEVEL || "low").toUpperCase();
+const THINKING_LEVEL = String(process.env.GEMINI_THINKING_LEVEL || "low")
+  .split("#")[0]
+  .trim()
+  .toUpperCase() || "LOW";
 
+/// Reads a model name from the environment defensively.
+///
+/// .env files are hand-edited and routinely pick up stray inline comments or
+/// trailing spaces ("GEMINI_MODEL=gemini-2.5-flash   # was 3.5"). Depending
+/// on the dotenv version those can end up INSIDE the value, producing a
+/// nonsense model name and a bare 404 on every request — which looks to the
+/// user like "the app can't hear me" rather than a typo. Strip comments and
+/// whitespace, and reject anything that isn't a plausible model id.
 const isGemini3 = (model) => /^gemini-3/i.test(String(model || ""));
+
+function envModel(name, fallback) {
+  let v = process.env[name];
+  if (typeof v !== "string") return fallback;
+  v = v.split("#")[0].trim().replace(/^["']|["']$/g, "").trim();
+  if (!v) return fallback;
+  if (!/^[a-z0-9][a-z0-9.\-_]*$/i.test(v)) {
+    console.error(
+      `env ${name}="${v}" is not a valid model name (stray comment or typo?) — using "${fallback}".`
+    );
+    return fallback;
+  }
+  return v;
+}
+
+const chatModel = () => envModel("GEMINI_MODEL", DEFAULT_MODEL);
 
 /// generationConfig additions that only apply to Gemini 3.
 function tuning(model, extra = {}) {
@@ -112,7 +139,7 @@ const TTS_TIMEOUT_MS = Number(process.env.GEMINI_TTS_TIMEOUT_MS) || 15_000;
 async function callGemini(messages, system = SYSTEM_PROMPT, _retry = false) {
   const key = process.env.GEMINI_API_KEY;
   if (!key) throw new Error("gemini: key missing");
-  const model = process.env.GEMINI_MODEL || DEFAULT_MODEL;
+  const model = chatModel();
 
   const generationConfig = tuning(model);
 
@@ -198,7 +225,7 @@ async function generateReply(messages, opts = {}) {
 async function* generateReplyStream(messages, opts = {}) {
   const key = requireKey();
   const system = opts.system || SYSTEM_PROMPT + (opts.extraSystem || "");
-  const model = process.env.GEMINI_MODEL || DEFAULT_MODEL;
+  const model = chatModel();
 
   // The streaming path is what the user actually waits on before hearing
   // Hari speak, so low thinking matters most here.
@@ -298,8 +325,8 @@ async function transcribeAudio(buffer, mimeType, opts = {}) {
   // transcription latency noticeably. Override with GEMINI_STT_MODEL (e.g.
   // "gemini-3.5-flash-lite") without touching chat quality; defaults to the
   // main chat model so existing deploys are unchanged.
-  const mainModel = process.env.GEMINI_MODEL || DEFAULT_MODEL;
-  const wanted = process.env.GEMINI_STT_MODEL || mainModel;
+  const mainModel = chatModel();
+  const wanted = envModel("GEMINI_STT_MODEL", mainModel);
   const model = DEAD_MODELS.has(wanted) ? mainModel : wanted;
   // The app records .m4a (AAC in an MP4 container). Normalize the label,
   // and keep a fallback: some Gemini deployments accept audio/mp4 but not
@@ -427,8 +454,8 @@ async function transcribeAudio(buffer, mimeType, opts = {}) {
 
 // Default voices per Gemini TTS: warm, natural, well-suited to an assistant.
 // Full list (30): Kore, Puck, Zephyr, Charon, Leda, Aoede, Callirrhoe, etc.
-const TTS_DEFAULT_VOICE = process.env.GEMINI_TTS_VOICE || "Kore";
-const TTS_MODEL = process.env.GEMINI_TTS_MODEL || "gemini-2.5-flash-preview-tts";
+const TTS_DEFAULT_VOICE = envModel("GEMINI_TTS_VOICE", "Kore");
+const TTS_MODEL = envModel("GEMINI_TTS_MODEL", "gemini-2.5-flash-preview-tts");
 const TTS_SAMPLE_RATE = 24000;
 
 // Prebuilt Gemini voice names (validated so a bad env/body can't 400 us).
@@ -518,6 +545,7 @@ async function synthesizeSpeech(text, opts = {}) {
 }
 
 module.exports = {
+  envModel,
   generateReply,
   generateReplyStream,
   transcribeAudio,

@@ -220,6 +220,28 @@ require("./db")
   .then(() => {
     app.listen(port, () => {
       console.log(`MYASSISTANT backend on :${port} (postgres ready)`);
+      // A key defined TWICE in .env silently keeps the LAST value, which is
+      // a brutal way to lose an afternoon: the file looks right at a glance
+      // but the app runs the other value. Call it out loudly at boot.
+      try {
+        const fs = require("fs");
+        const path = require("path");
+        const envPath = path.resolve(process.cwd(), ".env");
+        if (fs.existsSync(envPath)) {
+          const seen = new Map();
+          for (const line of fs.readFileSync(envPath, "utf8").split("\n")) {
+            const m = /^\s*([A-Z0-9_]+)\s*=/i.exec(line);
+            if (m) seen.set(m[1], (seen.get(m[1]) || 0) + 1);
+          }
+          const dupes = [...seen].filter(([, n]) => n > 1).map(([k]) => k);
+          if (dupes.length) {
+            console.error(
+              `  WARNING: .env defines these keys more than once — the LAST ` +
+                `value wins: ${dupes.join(", ")}`
+            );
+          }
+        }
+      } catch (_) {}
       // Print the models actually in use. A wrong/retired name otherwise
       // only shows up as a 404 on the user's first voice turn, which reads
       // like "the app can't hear me" rather than a config problem.
