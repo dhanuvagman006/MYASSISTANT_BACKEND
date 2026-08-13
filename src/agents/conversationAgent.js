@@ -84,14 +84,34 @@ async function handleStream(turn, onSentence) {
 
   let full = "";
   let pending = "";
+  let spokeFirst = false;
   // Sentence enders across languages this assistant speaks:
   // . ! ? and the Devanagari danda । (Hindi/Marathi).
   const flushComplete = () => {
     const m = pending.match(/^[\s\S]*?[.!?।](?=\s|$)/);
-    if (!m) return;
+    if (!m) {
+      // FIRST CHUNK ONLY: time-to-first-audio dominates how fast the
+      // assistant *feels*. If the opening sentence is long, waiting for its
+      // final full stop delays speech by seconds. So for the very first
+      // chunk of a turn, also break at a clause boundary once we have
+      // enough words to sound natural on its own. Every later sentence
+      // still flushes only on a true sentence ender, keeping prosody clean.
+      if (spokeFirst || pending.length < 60) return;
+      const c = pending.match(/^[\s\S]{40,}?[,;:—–](?=\s)/);
+      if (!c) return;
+      const clause = c[0].replace(/[,;:—–]\s*$/, "").trim();
+      if (!clause) return;
+      pending = pending.slice(c[0].length).replace(/^\s+/, "");
+      spokeFirst = true;
+      onSentence(clause);
+      return;
+    }
     const sentence = m[0].trim();
     pending = pending.slice(m[0].length).replace(/^\s+/, "");
-    if (sentence) onSentence(sentence);
+    if (sentence) {
+      spokeFirst = true;
+      onSentence(sentence);
+    }
   };
 
   try {
