@@ -83,6 +83,10 @@ const THINKING_LEVEL = String(process.env.GEMINI_THINKING_LEVEL || "low")
 /// user like "the app can't hear me" rather than a typo. Strip comments and
 /// whitespace, and reject anything that isn't a plausible model id.
 const isGemini3 = (model) => /^gemini-3/i.test(String(model || ""));
+// 2.5 Flash / Flash-Lite accept thinkingBudget: 0. 2.5 Pro does not, and the
+// TTS models take no thinkingConfig at all — so match narrowly.
+const isGemini25Flash = (model) =>
+  /^gemini-2\.5-flash/i.test(String(model || "")) && !/-tts$/i.test(String(model || ""));
 
 function envModel(name, fallback) {
   let v = process.env[name];
@@ -100,11 +104,25 @@ function envModel(name, fallback) {
 
 const chatModel = () => envModel("GEMINI_MODEL", DEFAULT_MODEL);
 
-/// generationConfig additions that only apply to Gemini 3.
+/// generationConfig additions that control per-model-family behaviour.
+///
+/// THINKING IS THE MAIN LATENCY LEVER. Both families reason before
+/// answering unless told not to, and for a voice assistant that reasoning
+/// happens while the user sits in silence:
+///   • Gemini 3   — thinking_level, defaults to "high".
+///   • Gemini 2.5 — thinkingBudget, defaults to DYNAMIC (up to 8192 tokens).
+/// Transcription and casual conversation need none of it, so we turn it
+/// down on both. Missing the 2.5 case is what left transcription slow
+/// enough to hit the request timeout.
 function tuning(model, extra = {}) {
   const cfg = { ...extra };
-  if (isGemini3(model) && !UNSUPPORTED_FIELDS.has("thinkingConfig")) {
+  const noThinking = UNSUPPORTED_FIELDS.has("thinkingConfig");
+  if (isGemini3(model) && !noThinking) {
     cfg.thinkingConfig = { thinkingLevel: THINKING_LEVEL };
+  } else if (isGemini25Flash(model) && !noThinking) {
+    // 0 disables thinking outright on the 2.5 Flash family (not valid on
+    // 2.5 Pro, hence the narrow match).
+    cfg.thinkingConfig = { thinkingBudget: 0 };
   }
   // Gemini 3 deprecated temperature/top_p/top_k; Google explicitly advises
   // removing them, as low values can cause looping or degraded output.
@@ -526,6 +544,13 @@ async function synthesizeSpeech(text, opts = {}) {
   );
   if (!r.ok) {
     const body = await r.text().catch(() => "");
+    // 503 "high demand" / 429 are TRANSIENT: the model is busy, not broken.
+    // One quick retry usually succeeds and saves the user from dropping to
+    // the robotic on-device voice mid-reply.
+    if ((r.status === 503 || r.status === 429) && !opts._retried) {
+      await new Promise((res) => setTimeout(res, 700));
+      return synthesizeSpeech(text, { ...opts, _retried: true });
+    }
     throw new Error(`gemini tts ${r.status} ${body.slice(0, 300)}`);
   }
   const data = await r.json();
