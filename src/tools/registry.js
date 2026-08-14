@@ -59,6 +59,15 @@ function get(name) {
   return REGISTRY.get(name) || null;
 }
 
+/**
+ * Removes a tool. Needed by MCP: when a server disconnects or fails, its
+ * tools must disappear from the registry so the model can no longer select
+ * something that cannot run.
+ */
+function unregister(name) {
+  return REGISTRY.delete(name);
+}
+
 function list() {
   return [...REGISTRY.values()];
 }
@@ -68,10 +77,15 @@ function list() {
  * `only` optionally restricts the set (e.g. a channel that can't do device
  * actions shouldn't be offered them).
  */
-function declarations({ only = null, includeDeviceActions = true } = {}) {
+function declarations({ only = null, includeDeviceActions = true, userId = null } = {}) {
+  const uid = userId === null || userId === undefined ? null : Number(userId);
   return list()
     .filter((t) => (only ? only.includes(t.name) : true))
     .filter((t) => (includeDeviceActions ? true : !t.deviceAction))
+    // TENANT BOUNDARY: an MCP tool belongs to the user who configured that
+    // server. Another user must never even SEE it in their declarations,
+    // let alone be able to call it (§6).
+    .filter((t) => t.source !== "mcp" || (uid !== null && t.userId === uid))
     .map((t) => ({
       name: t.name,
       description: t.description || "",
@@ -147,6 +161,12 @@ async function execute(name, rawArgs, ctx = {}) {
   const tool = get(name);
   if (!tool) return { ok: false, error: `unknown tool "${name}"` };
 
+  // Defence in depth: even if a name were guessed, an MCP tool may only be
+  // run by the user whose server provides it.
+  if (tool.source === "mcp" && Number(tool.userId) !== Number(ctx.userId)) {
+    return { ok: false, error: `unknown tool "${name}"` };
+  }
+
   const args = coerceArgs(tool, rawArgs);
   const missing = missingRequired(tool, args);
   if (missing.length) return { ok: false, needsArgs: missing };
@@ -182,6 +202,7 @@ async function execute(name, rawArgs, ctx = {}) {
 module.exports = {
   register,
   get,
+  unregister,
   list,
   declarations,
   execute,

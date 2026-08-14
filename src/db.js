@@ -221,6 +221,10 @@ async function init() {
   // the base schema because it ALTERs clients/agent_memories.
   await require("./memory/schema").migrate((sql) => pool.query(sql));
 
+  // MCP server registry (per-user external capabilities, credentials
+  // encrypted at rest).
+  await require("./mcp/schema").migrate((sql) => pool.query(sql));
+
   // SERIAL ids come back from pg as integers; BIGINT columns come back as
   // strings by default — parse them so Date-math keeps working.
   const types = require("pg").types;

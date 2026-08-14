@@ -9,12 +9,15 @@
     "test": "node tests/agent.test.js",
     "test:clients": "node scripts/clients-test.js",
     "test:agents": "node scripts/agents-test.js",
-    "test:e2e": "node tests/memory.e2e.test.js"
+    "test:e2e": "node tests/memory.e2e.test.js",
+    "test:mcp": "node tests/mcp.e2e.test.js",
+    "test:all": "npm run test && npm run test:e2e && npm run test:mcp"
   },
   "engines": {
     "node": ">=20"
   },
   "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.30.0",
     "bcryptjs": "^3.0.3",
     "chrono-node": "^2.10.0",
     "dotenv": "^16.4.5",

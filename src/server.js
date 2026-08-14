@@ -202,6 +202,10 @@ app.use("/region", regionRoute);
 // LIVE MODE (experimental): the probe route must register BEFORE the JSON
 // 404 catch-all below, or /live would always 404; the WS upgrade handler is
 // attached to the HTTP server after listen because it needs that handle.
+// MCP servers are per-user configuration, so the route sits behind the
+// same auth as the rest of the API.
+app.use("/mcp", appAuth, require("./mcp/routes"));
+
 const live = require("./live/proxy");
 app.use("/live", live.probeRouter());
 

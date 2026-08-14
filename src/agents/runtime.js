@@ -52,7 +52,9 @@ function systemPrompt(extra = "") {
  * @returns {{ text, deviceActions[], toolResults[], needsConfirmation? }}
  */
 async function runAgentTurn(userText, ctx = {}, onEvent = () => {}) {
-  const declarations = registry.declarations();
+  // Built-ins plus ONLY this user's MCP tools (§6). One selection path for
+  // both sources — the runtime does not know MCP exists (§1).
+  const declarations = registry.declarations({ userId: ctx.userId });
   const contents = [];
 
   // Short conversation context (§18) — recent turns only, never the whole

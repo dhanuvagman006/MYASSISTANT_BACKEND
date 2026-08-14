@@ -12,6 +12,7 @@
  * it never decides who "Ravi" is.
  */
 const { query, one, run } = require("../db");
+const embeddings = require("./embeddings");
 
 const now = () => Date.now();
 
@@ -215,13 +216,18 @@ async function remember(userId, {
     }
   }
 
+  // Embed on write so recall can rank semantically. Returns null when no
+  // provider is configured — the fact is still stored, ranking just stays
+  // lexical (§17).
+  const vec = embedding || (await embeddings.embedOne(text));
+
   return one(
     `INSERT INTO agent_memories
        (user_id,fact,importance,created_at,kind,subject_type,subject_id,
         source,source_ref,confidence,valid,updated_at,embedding)
      VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,1,$4,$11) RETURNING *`,
     [uid, text, importance, now(), kind, subjectType, subjectId, source,
-     sourceRef, confidence, embedding ? JSON.stringify(embedding) : null]
+     sourceRef, confidence, vec ? JSON.stringify(vec) : null]
   );
 }
 
@@ -379,6 +385,9 @@ function dedupeById(list) {
 async function search(userId, queryText, { embedding = null, limit = 12 } = {}) {
   const uid = assertUser(userId);
   const q = String(queryText || "").trim();
+  // Embed the QUESTION so it can be compared with stored facts; null here
+  // simply means the lexical branch below is used instead.
+  const qvec = embedding || (await embeddings.embedOne(q));
 
   // 1. Structured: does the question name a known person or case?
   const words = q.split(/\s+/).filter((w) => w.length > 2).slice(0, 8);
@@ -411,9 +420,9 @@ async function search(userId, queryText, { embedding = null, limit = 12 } = {}) 
   //    otherwise, so recall still works with no embedding provider.
   const scored = rows.map((r) => {
     let score = 0;
-    if (embedding && r.embedding) {
+    if (qvec && r.embedding) {
       const v = typeof r.embedding === "string" ? JSON.parse(r.embedding) : r.embedding;
-      score = cosine(embedding, v);
+      score = cosine(qvec, v);
     } else {
       const f = r.fact.toLowerCase();
       score = words.reduce((n, w) => n + (f.includes(w.toLowerCase()) ? 1 : 0), 0) /
