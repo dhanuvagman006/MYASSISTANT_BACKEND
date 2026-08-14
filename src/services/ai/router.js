@@ -620,7 +620,61 @@ async function synthesizeSpeech(text, opts = {}) {
   return { wav: pcmToWav(pcm, rate), voice, sampleRate: rate };
 }
 
+
+/**
+ * One function-calling round trip.
+ *
+ * Sends `contents` plus the tool declarations and returns whichever the
+ * model chose:
+ *   { functionCalls: [{name, args}, …] }   it wants tools run
+ *   { text: "…" }                          it answered directly
+ *
+ * The caller (agents/runtime) executes the tools, appends the results and
+ * calls again — that loop is what replaces the old regex dispatch.
+ */
+async function generateWithTools({ contents, system, declarations = [] }) {
+  const key = requireKey();
+  const model = chatModel();
+  const body = {
+    system_instruction: { parts: [{ text: system }] },
+    contents,
+    ...(declarations.length
+      ? { tools: [{ functionDeclarations: declarations }] }
+      : {}),
+  };
+  const gen = tuning(model);
+  if (Object.keys(gen).length) body.generationConfig = gen;
+
+  const r = await fetch(
+    `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent`,
+    {
+      method: "POST",
+      headers: { "content-type": "application/json", "x-goog-api-key": key },
+      signal: AbortSignal.timeout(TIMEOUT_MS),
+      body: JSON.stringify(body),
+    }
+  );
+  if (!r.ok) {
+    const errBody = await r.text().catch(() => "");
+    throw new Error(
+      `gemini tools ${r.status} [model=${model}] ${errBody.slice(0, 300) || "(empty body)"}`
+    );
+  }
+  const data = await r.json();
+  const parts = data.candidates?.[0]?.content?.parts || [];
+  const calls = parts
+    .filter((p) => p.functionCall)
+    .map((p) => ({ name: p.functionCall.name, args: p.functionCall.args || {} }));
+  const text = parts
+    .filter((p) => typeof p.text === "string")
+    .map((p) => p.text)
+    .join("\n")
+    .trim();
+  return { functionCalls: calls, text };
+}
+
 module.exports = {
+  generateWithTools,
   envModel,
   generateReply,
   generateReplyStream,

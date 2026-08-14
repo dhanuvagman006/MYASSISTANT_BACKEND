@@ -263,10 +263,97 @@ function detectSaveDocument(text) {
   return { note: t };
 }
 
+/**
+ * Runs a turn through the agent runtime and emits the existing SSE events,
+ * so the app needs no changes for Phase 1.
+ *
+ * Returns true if the turn was handled; false to fall back to the legacy
+ * regex chain (a runtime failure must never break the assistant).
+ */
+async function runViaAgent(s, req, userText) {
+  const { runAgentTurn } = require("../agents/runtime");
+  try {
+    const ctx = {
+      userId: req.user?.sub && req.user.sub !== "anonymous-dev" ? req.user.sub : null,
+      lat: Number(req.query?.lat) || undefined,
+      lng: Number(req.query?.lng) || undefined,
+      history: (s.history || []).slice(-8),
+      approved: false,
+    };
+
+    state(s, "thinking");
+    const out = await runAgentTurn(userText, ctx, (ev, payload) => {
+      // Surfaces "using a tool" so the UI can show real progress (§20).
+      if (ev === "tool_start") {
+        state(s, "using_tool");
+        emit(s, { type: "tool_start", name: payload.name });
+      }
+    });
+
+    // High-risk action: ask before doing anything.
+    if (out.needsConfirmation) {
+      s.pendingTool = out.needsConfirmation;
+      state(s, "speaking");
+      emit(s, {
+        type: "confirm_action",
+        summary: out.needsConfirmation.summary,
+      });
+      state(s, "completed");
+      s.busy = false;
+      return true;
+    }
+
+    // Device actions the PHONE must perform. The app already understands
+    // these event types.
+    for (const a of out.deviceActions) {
+      if (a.type === "open_camera") emit(s, { type: "open_camera", note: a.note });
+      else if (a.type === "open_video") emit(s, { type: "open_video" });
+      else if (a.type === "resolve_and_call") {
+        s.pendingContactName = a.name;
+        s.pendingCallTask = a.message || null;
+        s.agentRetries = 0;
+        state(s, "finding_contact");
+        emit(s, { type: "contact_lookup", name: a.name });
+        return true; // waits for POST /contacts
+      }
+    }
+
+    const text = String(out.text || "").trim();
+    if (!text && !out.deviceActions.length) return false; // nothing to say → legacy
+
+    if (text) {
+      state(s, "speaking");
+      emit(s, { type: "assistant_message", text });
+      s.history = [
+        ...(s.history || []),
+        { role: "user", content: userText },
+        { role: "assistant", content: text },
+      ].slice(-16);
+    }
+    state(s, "completed");
+    s.busy = false;
+    return true;
+  } catch (e) {
+    console.error("agent runtime failed, falling back:", e.message);
+    return false;
+  }
+}
+
 async function runTurn(s, req, userText) {
   s.busy = true;
   s.cancelled = false;
   try {
+    // ---- AGENT RUNTIME (Phase 1) -------------------------------------
+    // When enabled, the MODEL selects capabilities from the tool registry
+    // instead of the regex chain below. Set AGENT_RUNTIME=false to fall
+    // back to the legacy path while the new one is being validated.
+    if (process.env.AGENT_RUNTIME !== "false") {
+      const handled = await runViaAgent(s, req, userText);
+      if (handled) return;
+      // Falls through to the legacy chain if the runtime errored, so a
+      // bad turn degrades instead of breaking the assistant.
+    }
+
     // "Remind me to…" / "remember to…" is a REMINDER for the tool layer, not
     // a call or a camera capture — even though it contains words like "call"
     // ("remind me to call the doctor") or "save". Let it flow to the AI.
