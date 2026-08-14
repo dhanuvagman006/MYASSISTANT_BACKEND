@@ -1,33 +1,40 @@
 /**
  * AVATAR — real-time human face via Tavus CVI (tavusapi.com).
  *
- * Why Tavus (researched Aug 2026): it is the real-time conversational
- * specialist — the user talks WITH a photoreal human over WebRTC
- * (sub-second turns, natural interruptions), versus generation APIs
- * that render clips. Integration is one POST that returns a
- * `conversation_url` the app embeds in a WebView; Tavus runs the whole
- * low-latency loop (VAD, STT, LLM, TTS, lip-synced video).
+ * This is the ONE canonical live-video path (Rebuild Directive §7): the
+ * backend mints a conversation and returns a WebRTC room URL; the app's
+ * LiveScreen embeds it full-screen. Tavus runs the whole low-latency
+ * loop (VAD, STT, LLM, TTS, lip-synced video, barge-in).
  *
- * PERSONALIZATION: every session's `conversational_context` is built
- * from OUR persona + the user's remembered facts (agents/memory), so
- * the face greets the user by name and knows their life — same person
- * as the orb voice loop.
+ * PERSONALIZATION (§15–§18): every session is built from the user's own
+ * data via users/context — the configured assistant name/gender/style,
+ * the user's name, standing instructions, and remembered facts — so the
+ * face IS the same assistant as the rest of the product, not a stranger.
+ *
+ * GREETING (§10, §15): the greeting is delivered by Tavus itself as
+ * `custom_greeting`, spoken only after the participant has actually
+ * joined the live room. It is therefore structurally impossible for the
+ * greeting to fire while disconnected — the app never speaks it.
+ *
+ * OPPOSITE-GENDER DEFAULT (§16): if the user has not explicitly chosen
+ * an assistant gender, a male user gets the female replica and a female
+ * user gets the male replica (when both are configured).
  *
  * Env (feature hidden while unset):
- *   TAVUS_API_KEY   from platform.tavus.io (free tier ~25 conversation minutes)
- *   TAVUS_FACE_ID   a face/replica id — pick a stock female face in the
- *                   Tavus platform library and paste its id
- *   TAVUS_PAL_ID    optional; a PAL configured in Tavus (can carry a
- *                   custom-LLM layer pointing back at this server later)
- *   TAVUS_MAX_CALL_SECONDS  optional, default 900 (guards the free tier)
+ *   TAVUS_API_KEY        from platform.tavus.io
+ *   TAVUS_FACE_ID        default face/replica id (female stock face)
+ *   TAVUS_FACE_ID_MALE   optional male face for the opposite-gender rule
+ *   TAVUS_PAL_ID         optional persona layer
+ *   TAVUS_MAX_CALL_SECONDS  optional, default 900
  *
  * Routes:
  *   GET  /avatar/status   -> { enabled }
- *   POST /avatar/session  -> { url }   (starts a conversation)
+ *   POST /avatar/session  -> { url, conversationId, assistantName }
+ *        body: { localHour?: 0-23 }  (device-local hour for the greeting)
  */
 const router = require("express").Router();
-const { one } = require("../db");
 const memory = require("../agents/memory");
+const userContext = require("../users/context");
 
 const TAVUS_BASE = "https://tavusapi.com";
 const enabled = () =>
@@ -38,36 +45,94 @@ function uidOf(req) {
   return Number.isInteger(id) && id > 0 ? id : null;
 }
 
-/** The face's brain-context: who she is + who the user is. */
-async function buildContext(userId) {
-  let userLine = "";
-  if (userId) {
+/** "morning" | "afternoon" | "evening" from the user's local hour. */
+function partOfDay(hour) {
+  if (!Number.isFinite(hour)) return "";
+  if (hour < 12) return "morning";
+  if (hour < 17) return "afternoon";
+  return "evening";
+}
+
+/** Local hour from body.localHour, else the user's stored IANA timezone. */
+function resolveLocalHour(body, profile) {
+  const h = Number(body?.localHour);
+  if (Number.isInteger(h) && h >= 0 && h <= 23) return h;
+  const tz = profile?.user?.timezone;
+  if (tz) {
     try {
-      const u = await one(`SELECT name, gender FROM users WHERE id=$1`, [userId]);
-      if (u?.name) userLine = `The user's name is ${u.name}. `;
+      return Number(
+        new Intl.DateTimeFormat("en-GB", {
+          hour: "numeric", hour12: false, timeZone: tz,
+        }).format(new Date())
+      );
     } catch (_) {}
   }
-  let facts = "";
-  try {
-    const rows = await memory.listMemories(userId);
-    if (rows.length) {
-      facts =
-        "Things you remember about them from earlier conversations " +
-        "(use naturally, never recite): " +
-        rows.map((r) => r.fact).join("; ") +
-        ". ";
-    }
-  } catch (_) {}
-  return (
-    "You are Hari, the user's warm, quick-witted personal assistant and " +
-    "friend. Speak naturally like a human on a video call: contractions, " +
+  return NaN;
+}
+
+/**
+ * Everything about this session's identity, resolved from the DB:
+ * assistant name/gender/style, face id, the greeting line, and the
+ * conversational context. Falls back safely for anonymous/dev sessions.
+ */
+async function buildSession(userId, body) {
+  let profile = null;
+  let instructions = [];
+  let facts = [];
+  if (userId) {
+    try { profile = await userContext.getProfile(userId); } catch (_) {}
+    try { instructions = await userContext.listInstructions(userId); } catch (_) {}
+    try { facts = await memory.listMemories(userId); } catch (_) {}
+  }
+
+  const userName = profile?.user?.name?.trim() || "";
+  const userGender = String(profile?.user?.gender || "").toLowerCase();
+  const assistant = profile?.assistant || { name: "Hari", gender: "", voice: "", style: "" };
+  const assistantName = assistant.name || "Hari";
+
+  // §16 — explicit preference wins; otherwise opposite of the user.
+  let gender = String(assistant.gender || "").toLowerCase();
+  if (!gender) {
+    gender = userGender === "female" ? "male" : userGender === "male" ? "female" : "";
+  }
+  const faceId =
+    gender === "male" && process.env.TAVUS_FACE_ID_MALE
+      ? process.env.TAVUS_FACE_ID_MALE
+      : process.env.TAVUS_FACE_ID;
+
+  // §15 — greeting from stored config, never hard-coded names.
+  const pod = partOfDay(resolveLocalHour(body, profile));
+  const hello = pod ? `Good ${pod}` : "Hello";
+  const greeting = userName
+    ? `${hello}, ${userName}. I'm ${assistantName}. How can I help you today?`
+    : `${hello}. I'm ${assistantName}. How can I help you today?`;
+
+  // Conversational context: persona + user + rules + memory.
+  const styleLine =
+    assistant.style === "concise" ? "Keep replies short and to the point. " :
+    assistant.style === "formal" ? "Keep a polished, professional tone. " :
+    assistant.style === "friendly" ? "Be warm and personable. " : "";
+  const rules = instructions.length
+    ? "The user's standing rules — always respect them: " +
+      instructions.map((r) => r.instruction).join("; ") + ". "
+    : "";
+  const memoryLine = facts.length
+    ? "Things you remember about them from earlier conversations " +
+      "(use naturally, never recite): " +
+      facts.map((r) => r.fact).join("; ") + ". "
+    : "";
+  const userLine = userName ? `The user's name is ${userName}. ` : "";
+
+  const context =
+    `You are ${assistantName}, the user's warm, quick-witted personal ` +
+    "assistant. Speak naturally like a human on a video call: contractions, " +
     "short sentences, one thought at a time, brief genuine reactions. " +
     "Match the user's language. " +
-    userLine +
-    facts +
+    styleLine + userLine + rules + memoryLine +
     "Never mention being an avatar or AI unless directly asked; if asked, " +
-    "answer honestly and lightly, then move on."
-  );
+    "answer honestly and lightly, then move on.";
+
+  return { faceId, assistantName, greeting, context };
 }
 
 router.get("/status", (_req, res) => res.json({ enabled: enabled() }));
@@ -78,10 +143,11 @@ router.post("/session", async (req, res) => {
   }
   const userId = uidOf(req);
   try {
+    const s = await buildSession(userId, req.body || {});
     const body = {
-      face_id: process.env.TAVUS_FACE_ID,
-      conversational_context: await buildContext(userId),
-      custom_greeting: "Hey! Good to see you.",
+      face_id: s.faceId,
+      conversational_context: s.context,
+      custom_greeting: s.greeting,
       properties: {
         language: "multilingual",
         max_call_duration:
@@ -110,7 +176,11 @@ router.post("/session", async (req, res) => {
         .status(502)
         .json({ error: "avatar session failed", detail: String(msg).slice(0, 200) });
     }
-    res.json({ url: j.conversation_url, conversationId: j.conversation_id });
+    res.json({
+      url: j.conversation_url,
+      conversationId: j.conversation_id,
+      assistantName: s.assistantName,
+    });
   } catch (e) {
     console.error("tavus error:", e.message);
     res.status(502).json({ error: "avatar unavailable" });
@@ -118,3 +188,4 @@ router.post("/session", async (req, res) => {
 });
 
 module.exports = router;
+module.exports.buildSession = buildSession; // exported for tests
