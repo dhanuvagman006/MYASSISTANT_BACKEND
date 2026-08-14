@@ -188,14 +188,53 @@ async function execute(name, rawArgs, ctx = {}) {
     const out = await tool.execute(args, ctx);
     const res = out && typeof out === "object" ? out : { ok: true, data: out };
     res.ms = Date.now() - started;
+    audit(tool, args, res, ctx);
     return res;
   } catch (e) {
     // §28: report the actual failure; never fabricate success.
-    return {
+    const res = {
       ok: false,
       error: String((e && e.message) || e).slice(0, 300),
       ms: Date.now() - started,
     };
+    audit(tool, args, res, ctx);
+    return res;
+  }
+}
+
+/**
+ * OBSERVABILITY + AUDIT (§23/§26). Every tool execution is timed, counted
+ * and — for anything that changes state or reaches an external system —
+ * written to the user-visible audit trail. Arguments are redacted before
+ * logging: a tool call can carry credentials or private content.
+ */
+function audit(tool, args, res, ctx) {
+  try {
+    const obs = require("../infra/observability");
+    obs.observe(`tool.${tool.name}`, res.ms || 0);
+    obs.count(`tool.${tool.name}.${res.ok ? "ok" : "error"}`);
+    obs.logger.info("tool", {
+      tool: tool.name,
+      source: tool.source || "builtin",
+      risk: tool.risk,
+      ok: res.ok !== false,
+      ms: res.ms,
+      uid: ctx.userId ?? null,
+      args: obs.redact(args),
+      error: res.error,
+    });
+    // Durable trail for anything consequential.
+    if (ctx.userId && (tool.risk !== "low" || tool.source === "mcp")) {
+      require("../audit/log")
+        .record(
+          ctx.userId,
+          `tool.${tool.name}`,
+          `${res.ok !== false ? "ok" : "failed"}${res.error ? ": " + res.error.slice(0, 80) : ""}`
+        )
+        .catch(() => {});
+    }
+  } catch (_) {
+    // Auditing must never break a turn.
   }
 }
 

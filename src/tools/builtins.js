@@ -373,6 +373,27 @@ function registerBuiltins() {
   // ---------------- PRODUCTIVITY ----------------
 
   registry.register({
+    name: "search_flights",
+    description:
+      "Find real flights between two cities on a date. Use for 'next flight " +
+      "from Bangalore to Delhi', 'flights to Mumbai tomorrow'.",
+    risk: "low",
+    inputSchema: {
+      type: "object",
+      properties: {
+        from: { type: "string", description: "Origin city or 3-letter airport code" },
+        to: { type: "string", description: "Destination city or 3-letter airport code" },
+        date: { type: "string", description: "Departure date YYYY-MM-DD; omit for tomorrow" },
+        adults: { type: "integer", description: "Passengers, default 1" },
+      },
+      required: ["from", "to"],
+    },
+    async execute(args) {
+      return require("./flights").search(args);
+    },
+  });
+
+  registry.register({
     name: "find_document",
     description:
       "Find a specific document, optionally belonging to a person — e.g. " +

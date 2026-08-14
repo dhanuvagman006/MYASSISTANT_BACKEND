@@ -53,13 +53,16 @@ async function analyzeInBackground(userId, row, buffer, mime) {
     try {
       const text = updated.full_text || meta.fullText || "";
       if (text) {
-        const idx = await intelligence.indexDocument(userId, row.id, text);
-        console.log(
-          `docs: indexed #${row.id} (${idx.chunks} chunks, embedded=${idx.embedded})`
+        // QUEUED, not inline: chunking + embedding a long PDF must never
+        // sit in front of the user's next voice turn (§25).
+        await require("../infra/jobs").enqueue(
+          "document.index",
+          { userId, documentId: row.id, text },
+          { userId }
         );
       }
     } catch (e) {
-      console.error("docs indexing failed (document kept):", e.message);
+      console.error("docs indexing enqueue failed (document kept):", e.message);
     }
     // A one-line durable fact ("context") so plain chat — with no document
     // search at all — still knows about the visit/purchase. Title + date

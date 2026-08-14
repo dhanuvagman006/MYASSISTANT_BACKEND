@@ -11,8 +11,9 @@
     "test:agents": "node scripts/agents-test.js",
     "test:e2e": "node tests/memory.e2e.test.js",
     "test:mcp": "node tests/mcp.e2e.test.js",
-    "test:all": "npm run test && npm run test:e2e && npm run test:mcp && npm run test:docs",
-    "test:docs": "node tests/documents.e2e.test.js"
+    "test:all": "npm run test && npm run test:e2e && npm run test:mcp && npm run test:docs && npm run test:infra",
+    "test:docs": "node tests/documents.e2e.test.js",
+    "test:infra": "node tests/infra.e2e.test.js"
   },
   "engines": {
     "node": ">=20"

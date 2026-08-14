@@ -25,6 +25,11 @@ if (process.env.NODE_ENV === "production" && process.env.AUTH_DISABLED === "true
 }
 
 const app = express();
+
+// OBSERVABILITY: correlation id + structured access log on every request,
+// so one voice turn can be traced HTTP -> agent -> tool -> MCP -> database.
+const observability = require("./infra/observability");
+app.use(observability.requestId());
 app.set("trust proxy", 1);
 app.use(helmet());
 
@@ -208,6 +213,17 @@ app.use("/mcp", appAuth, require("./mcp/routes"));
 
 const live = require("./live/proxy");
 app.use("/live", live.probeRouter());
+
+// Agent-level metrics (tool latency, job counts, agent turns). Mounted at
+// /metrics/agent because /metrics already serves Prometheus process
+// metrics — two handlers on one path would silently shadow each other.
+app.get("/metrics/agent", (req, res) => {
+  const want = process.env.METRICS_TOKEN;
+  if (want && req.headers["x-metrics-token"] !== want) {
+    return res.status(401).json({ error: "unauthorized" });
+  }
+  res.json(observability.snapshot());
+});
 
 // JSON 404 for unmatched routes (instead of Express's default HTML page)
 app.use((_req, res) => res.status(404).json({ error: "not found" }));
