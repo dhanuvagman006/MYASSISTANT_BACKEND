@@ -373,6 +373,75 @@ function registerBuiltins() {
   // ---------------- PRODUCTIVITY ----------------
 
   registry.register({
+    name: "find_document",
+    description:
+      "Find a specific document, optionally belonging to a person — e.g. " +
+      "'find Ravi's court notice', 'show me the electricity bill'. Searches " +
+      "INSIDE document contents, not just titles.",
+    risk: "low",
+    inputSchema: {
+      type: "object",
+      properties: {
+        query: { type: "string", description: "What the document is, e.g. 'court notice'" },
+        person: { type: "string", description: "Whose document, if the user named someone" },
+      },
+      required: ["query"],
+    },
+    async execute(args, ctx) {
+      if (!ctx.userId) return { ok: false, error: "not signed in" };
+      const intel = require("../docs/intelligence");
+      const r = await intel.findDocuments(ctx.userId, args.query, { person: args.person });
+      if (!r.found) {
+        return {
+          ok: false,
+          error: r.scope
+            ? `no documents for ${r.scope} matching that`
+            : "no matching documents",
+        };
+      }
+      return { ok: true, data: r.documents };
+    },
+  });
+
+  registry.register({
+    name: "associate_document",
+    description:
+      "Link the most recent (or a named) document to a person and/or case — " +
+      "'this document belongs to Ravi's case'.",
+    risk: "medium",
+    inputSchema: {
+      type: "object",
+      properties: {
+        document_id: { type: "integer", description: "Omit to use the newest document" },
+        person: { type: "string" },
+        case_title: { type: "string" },
+      },
+    },
+    async execute(args, ctx) {
+      if (!ctx.userId) return { ok: false, error: "not signed in" };
+      const intel = require("../docs/intelligence");
+      const { one } = require("../db");
+      let id = args.document_id;
+      if (!id) {
+        const latest = await one(
+          `SELECT id FROM documents WHERE user_id=$1 ORDER BY created_at DESC LIMIT 1`,
+          [ctx.userId]
+        );
+        if (!latest) return { ok: false, error: "no documents saved yet" };
+        id = latest.id;
+      }
+      const out = await intel.associate(ctx.userId, id, {
+        person: args.person || null,
+        caseTitle: args.case_title || null,
+      });
+      if (!out.person && !out.case) {
+        return { ok: false, error: "name a person or case to link it to" };
+      }
+      return { ok: true, data: out, speak: "Linked." };
+    },
+  });
+
+  registry.register({
     name: "create_reminder",
     description:
       "Create a reminder or task for the user, optionally with a due time.",

@@ -16,6 +16,7 @@ const multer = require("multer");
 const fs = require("fs");
 const docs = require("../docs/store");
 const { analyzeDocument } = require("../docs/analyze");
+const intelligence = require("../docs/intelligence");
 const audit = require("../audit/log");
 // BUGFIX (Aug 2026): `memory` was used below but never required — every
 // DELETE /docs/:id threw ReferenceError, and the post-analysis memory
@@ -45,6 +46,21 @@ async function analyzeInBackground(userId, row, buffer, mime) {
     const meta = await analyzeDocument(buffer, mime);
     if (!meta) return;
     const updated = (await docs.setMetadata(userId, row.id, meta)) || row;
+
+    // CHUNK + EMBED the extracted text so "find Ravi's court notice" can
+    // search inside the document, not just its title. Failure here must not
+    // lose the document itself, so it is caught separately.
+    try {
+      const text = updated.full_text || meta.fullText || "";
+      if (text) {
+        const idx = await intelligence.indexDocument(userId, row.id, text);
+        console.log(
+          `docs: indexed #${row.id} (${idx.chunks} chunks, embedded=${idx.embedded})`
+        );
+      }
+    } catch (e) {
+      console.error("docs indexing failed (document kept):", e.message);
+    }
     // A one-line durable fact ("context") so plain chat — with no document
     // search at all — still knows about the visit/purchase. Title + date
     // ONLY: the note/summary live on the document row and are injected by
