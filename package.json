@@ -8,7 +8,8 @@
     "dev": "node --watch src/server.js",
     "test": "node tests/agent.test.js",
     "test:clients": "node scripts/clients-test.js",
-    "test:agents": "node scripts/agents-test.js"
+    "test:agents": "node scripts/agents-test.js",
+    "test:e2e": "node tests/memory.e2e.test.js"
   },
   "engines": {
     "node": ">=20"

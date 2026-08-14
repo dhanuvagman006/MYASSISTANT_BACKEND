@@ -136,13 +136,23 @@ function registerBuiltins() {
       type: "object",
       properties: {
         fact: { type: "string", description: "The fact, in third person: 'prefers Kannada'" },
+        about: { type: "string", description: "Person this fact concerns, if any" },
         importance: { type: "integer", description: "1-5, default 3" },
       },
       required: ["fact"],
     },
     async execute(args, ctx) {
       if (!ctx.userId) return { ok: false, error: "not signed in" };
-      await memory.saveMemory(ctx.userId, args.fact, args.importance || 3);
+      let subjectType = "", subjectId = null;
+      if (args.about) {
+        const p = await mem.findPerson(ctx.userId, args.about);
+        if (p) { subjectType = "person"; subjectId = p.id; }
+      }
+      await mem.remember(ctx.userId, {
+        fact: args.fact,
+        importance: args.importance || 3,
+        subjectType, subjectId,
+      });
       return { ok: true, data: { saved: args.fact }, speak: "I'll remember that." };
     },
   });
@@ -150,18 +160,153 @@ function registerBuiltins() {
   registry.register({
     name: "recall_memory",
     description:
-      "Look up what is remembered about the user. Use when asked 'what do you " +
-      "know about me', or when personal context would improve the answer.",
+      "Look up what is remembered about the user or a topic. Use when asked " +
+      "'what do you know about me', 'what did I tell you about X', or when " +
+      "personal context would improve the answer.",
     risk: "low",
-    inputSchema: { type: "object", properties: {} },
-    async execute(_args, ctx) {
+    inputSchema: {
+      type: "object",
+      properties: { query: { type: "string", description: "What to recall about" } },
+    },
+    async execute(args, ctx) {
       if (!ctx.userId) return { ok: false, error: "not signed in" };
+      if (args.query) {
+        const r = await mem.search(ctx.userId, args.query);
+        return { ok: true, data: r };
+      }
       const list = await memory.listMemories(ctx.userId);
       return { ok: true, data: list };
     },
   });
 
   // ---------------- PEOPLE (clients/contacts the user told us about) ------
+
+  const mem = require("../memory/service");
+
+  registry.register({
+    name: "remember_person",
+    description:
+      "Record or update a PERSON the user tells you about — their name, how " +
+      "they relate to the user (client, patient, friend, colleague), their " +
+      "organisation and location. Use for 'Ravi is my client', 'my doctor is " +
+      "Dr Rao at Manipal'.",
+    risk: "medium",
+    inputSchema: {
+      type: "object",
+      properties: {
+        name: { type: "string", description: "Person's name" },
+        relationship: { type: "string", description: "client, patient, friend, wife, colleague…" },
+        organisation: { type: "string", description: "Company or institution" },
+        location: { type: "string", description: "City or place" },
+      },
+      required: ["name"],
+    },
+    async execute(args, ctx) {
+      if (!ctx.userId) return { ok: false, error: "not signed in" };
+      const p = await mem.upsertPerson(ctx.userId, args);
+      return { ok: true, data: { id: p.id, name: p.name }, speak: "Noted." };
+    },
+  });
+
+  registry.register({
+    name: "remember_case",
+    description:
+      "Record a CASE, matter or project — a legal case, medical record, " +
+      "business project or personal matter — and optionally attach a person " +
+      "to it. Use for 'his case is a property dispute in Mangalore'.",
+    risk: "medium",
+    inputSchema: {
+      type: "object",
+      properties: {
+        title: { type: "string", description: "Short title, e.g. 'Property dispute'" },
+        person: { type: "string", description: "Person this case belongs to" },
+        description: { type: "string" },
+        location: { type: "string" },
+        status: { type: "string", description: "open, closed, on_hold" },
+      },
+      required: ["title"],
+    },
+    async execute(args, ctx) {
+      if (!ctx.userId) return { ok: false, error: "not signed in" };
+      let personId = null;
+      if (args.person) {
+        const p = await mem.upsertPerson(ctx.userId, { name: args.person });
+        personId = p.id;
+      }
+      const c = await mem.upsertCase(ctx.userId, { ...args, personId });
+      return { ok: true, data: { id: c.id, title: c.title }, speak: "Got it." };
+    },
+  });
+
+  registry.register({
+    name: "remember_event",
+    description:
+      "Record a dated event tied to a person or case — a hearing, meeting, " +
+      "appointment or deadline. Use for \'Ravi\'s next hearing is on September 3\'.",
+    risk: "medium",
+    inputSchema: {
+      type: "object",
+      properties: {
+        title: { type: "string", description: "What the event is" },
+        when: { type: "string", description: "ISO-8601 date/time if known" },
+        person: { type: "string", description: "Person it relates to" },
+        case_title: { type: "string", description: "Case it relates to" },
+      },
+      required: ["title"],
+    },
+    async execute(args, ctx) {
+      if (!ctx.userId) return { ok: false, error: "not signed in" };
+      let subjectType = "", subjectId = null;
+      if (args.person) {
+        const p = await mem.upsertPerson(ctx.userId, { name: args.person });
+        subjectType = "person"; subjectId = p.id;
+      }
+      const when = args.when ? Date.parse(args.when) : NaN;
+      const e = await mem.addEvent(ctx.userId, {
+        title: args.title,
+        whenAt: Number.isFinite(when) ? when : null,
+        subjectType, subjectId,
+      });
+      // Also store as a retrievable fact so plain recall finds it.
+      if (subjectId) {
+        await mem.remember(ctx.userId, {
+          fact: args.when ? `${args.title} on ${args.when}` : args.title,
+          kind: "episodic", subjectType, subjectId, importance: 4,
+        });
+      }
+      return { ok: true, data: { id: e.id }, speak: "I'll remember that." };
+    },
+  });
+
+  registry.register({
+    name: "forget_memory",
+    description:
+      "Delete or correct something previously remembered, when the user says " +
+      "it is wrong or asks you to forget it. Use for 'forget Ravi\'s hearing " +
+      "date', 'Ravi is not my client anymore'.",
+    risk: "high",
+    inputSchema: {
+      type: "object",
+      properties: {
+        about: { type: "string", description: "Person or case it concerns" },
+        what: { type: "string", description: "What to forget, e.g. 'hearing date'" },
+      },
+      required: ["what"],
+    },
+    confirmSummary: (a) =>
+      a.about ? `Forget ${a.about}'s ${a.what}` : `Forget: ${a.what}`,
+    async execute(args, ctx) {
+      if (!ctx.userId) return { ok: false, error: "not signed in" };
+      let subjectType = "", subjectId = null;
+      if (args.about) {
+        const p = await mem.findPerson(ctx.userId, args.about);
+        if (p) { subjectType = "person"; subjectId = p.id; }
+      }
+      const n = await mem.forget(ctx.userId, { subjectType, subjectId, match: args.what });
+      if (!n) return { ok: false, error: "nothing matching was stored" };
+      return { ok: true, data: { forgotten: n }, speak: "Forgotten." };
+    },
+  });
 
   registry.register({
     name: "lookup_person",
@@ -177,9 +322,8 @@ function registerBuiltins() {
     },
     async execute(args, ctx) {
       if (!ctx.userId) return { ok: false, error: "not signed in" };
-      const found = await people.findByName(ctx.userId, args.name);
-      if (!found) return { ok: false, error: `no stored details for ${args.name}` };
-      const profile = await people.getProfile(ctx.userId, found.id);
+      const profile = await mem.recallAbout(ctx.userId, args.name);
+      if (!profile) return { ok: false, error: `nothing stored about ${args.name}` };
       return { ok: true, data: profile };
     },
   });
@@ -196,10 +340,13 @@ function registerBuiltins() {
     },
     async execute(args, ctx) {
       if (!ctx.userId) return { ok: false, error: "not signed in" };
-      const found = await people.findByName(ctx.userId, args.name);
+      const found = await mem.findPerson(ctx.userId, args.name);
       if (!found) return { ok: false, error: `no person named ${args.name}` };
-      const list = await people.listClientDocuments(ctx.userId, found.id);
-      return { ok: true, data: list };
+      const list = await mem.documentsFor(ctx.userId, "person", found.id);
+      const profile = await mem.recallAbout(ctx.userId, args.name);
+      const all = profile ? profile.documents : list;
+      if (!all.length) return { ok: false, error: `no documents stored for ${args.name}` };
+      return { ok: true, data: all };
     },
   });
 

@@ -215,6 +215,12 @@ async function init() {
     ALTER TABLE documents ADD COLUMN IF NOT EXISTS client_id BIGINT;
     CREATE INDEX IF NOT EXISTS idx_docs_client ON documents(user_id, client_id, created_at DESC);
   `);
+
+  // PHASE 2: entity + memory model (people widened, cases, document links,
+  // typed/correctable memories, events, conversation history). Runs after
+  // the base schema because it ALTERs clients/agent_memories.
+  await require("./memory/schema").migrate((sql) => pool.query(sql));
+
   // SERIAL ids come back from pg as integers; BIGINT columns come back as
   // strings by default — parse them so Date-math keeps working.
   const types = require("pg").types;
