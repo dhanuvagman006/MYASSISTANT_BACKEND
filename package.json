@@ -11,10 +11,11 @@
     "test:agents": "node scripts/agents-test.js",
     "test:e2e": "node tests/memory.e2e.test.js",
     "test:mcp": "node tests/mcp.e2e.test.js",
-    "test:all": "npm run test && npm run test:e2e && npm run test:mcp && npm run test:docs && npm run test:infra && npm run test:context",
+    "test:all": "npm run test && npm run test:e2e && npm run test:mcp && npm run test:docs && npm run test:infra && npm run test:context && npm run test:avatar",
     "test:docs": "node tests/documents.e2e.test.js",
     "test:infra": "node tests/infra.e2e.test.js",
-    "test:context": "node tests/usercontext.e2e.test.js"
+    "test:context": "node tests/usercontext.e2e.test.js",
+    "test:avatar": "node tests/avatar.e2e.test.js"
   },
   "engines": {
     "node": ">=20"

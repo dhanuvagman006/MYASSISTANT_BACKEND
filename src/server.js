@@ -137,7 +137,16 @@ app.use("/assistant", appAuth, perUserLimit, assistantRoutes);
 // Onboarding survey + profile view (feeds users table + agent memory).
 app.use("/profile", appAuth, require("./routes/profile"));
 
-// Real-time human avatar (Tavus CVI) — hidden until TAVUS_* env is set.
+// Real-time human avatar (Tavus CVI). Media = Tavus; brain = OUR agent.
+// PUBLIC mounts first (no app auth):
+//   /avatar/room     the WebView room page (carries no auth header)
+//   /avatar/llm      Tavus persona custom-LLM callback (per-user bearer key)
+//   /avatar/webhook  Tavus event callbacks (transcripts, shutdown)
+app.use("/avatar/room", require("./avatar/room"));
+app.use("/avatar/llm", require("./avatar/llm").router);
+app.use("/avatar/webhook", require("./avatar/tavus").webhook);
+// Authenticated app-facing routes:
+app.use("/avatar/actions", appAuth, require("./avatar/actions"));
 app.use("/avatar", appAuth, require("./avatar/tavus"));
 
 
