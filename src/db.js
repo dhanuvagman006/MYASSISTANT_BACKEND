@@ -231,6 +231,9 @@ async function init() {
   // Background job queue (OCR/embedding off the request path).
   await require("./infra/jobs").migrate((sql) => pool.query(sql));
 
+  // User context: widened profile, assistant identity, standing rules.
+  await require("./users/context").migrate((sql) => pool.query(sql));
+
   // SERIAL ids come back from pg as integers; BIGINT columns come back as
   // strings by default — parse them so Date-math keeps working.
   const types = require("pg").types;

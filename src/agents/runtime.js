@@ -25,7 +25,8 @@ const MAX_TOOL_ROUNDS = 3; // guards against a tool-calling loop
 
 function systemPrompt(extra = "") {
   return (
-    "You are Hari, a warm, quick-witted personal assistant from India. " +
+    "You are the user's personal assistant — warm, quick-witted, from India. " +
+    "(Your name and identity are provided below when configured.) " +
     "You are having a SPOKEN conversation, so keep replies short and natural " +
     "— one or two sentences unless asked for detail. Reply in whatever " +
     "language the user speaks (English, Kannada, Hindi or a mix).\n\n" +
@@ -52,6 +53,14 @@ function systemPrompt(extra = "") {
  * @returns {{ text, deviceActions[], toolResults[], needsConfirmation? }}
  */
 async function runAgentTurn(userText, ctx = {}, onEvent = () => {}) {
+  // WHO the user is, WHO the assistant is, and the user's STANDING RULES
+  // sit in front of every decision — this is the judgment layer (§13/§14).
+  if (ctx.userId && ctx.extraSystem === undefined) {
+    try {
+      const block = await require("../users/context").contextBlock(ctx.userId);
+      if (block) ctx = { ...ctx, extraSystem: "\n\n" + block };
+    } catch (_) {}
+  }
   // Built-ins plus ONLY this user's MCP tools (§6). One selection path for
   // both sources — the runtime does not know MCP exists (§1).
   const declarations = registry.declarations({ userId: ctx.userId });

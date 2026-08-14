@@ -503,6 +503,98 @@ function registerBuiltins() {
     },
   });
 
+  // ---------------- PROFILE + STANDING RULES ----------------
+  const userCtx = require("../users/context");
+
+  registry.register({
+    name: "update_my_profile",
+    description:
+      "Save personal details the user shares about THEMSELVES — profession, " +
+      "organisation, location, preferred language, what to call them. Use " +
+      "for 'I'm a software engineer at Acme in Mangalore', 'call me Dhanu'.",
+    risk: "medium",
+    inputSchema: {
+      type: "object",
+      properties: {
+        name: { type: "string", description: "What the user wants to be called" },
+        profession: { type: "string" },
+        organisation: { type: "string" },
+        location: { type: "string" },
+        preferred_language: { type: "string" },
+      },
+    },
+    async execute(args, ctx) {
+      if (!ctx.userId) return { ok: false, error: "not signed in" };
+      const p = await userCtx.updateProfile(ctx.userId, args);
+      return { ok: true, data: p.user, speak: "Got it." };
+    },
+  });
+
+  registry.register({
+    name: "add_standing_instruction",
+    description:
+      "Save a PERMANENT rule for how the assistant should behave — 'always " +
+      "ask before sending messages', 'you can create reminders without " +
+      "asking', 'never call anyone after 10pm'. Use when the user states a " +
+      "lasting preference about YOUR behaviour, not a one-off request.",
+    risk: "medium",
+    inputSchema: {
+      type: "object",
+      properties: { instruction: { type: "string", description: "The rule, verbatim" } },
+      required: ["instruction"],
+    },
+    async execute(args, ctx) {
+      if (!ctx.userId) return { ok: false, error: "not signed in" };
+      await userCtx.addInstruction(ctx.userId, args.instruction);
+      return { ok: true, speak: "Understood — I'll always do that." };
+    },
+  });
+
+  registry.register({
+    name: "remove_standing_instruction",
+    description:
+      "Remove a previously saved behaviour rule when the user cancels it — " +
+      "'you don't need to ask before reminders anymore'.",
+    risk: "medium",
+    inputSchema: {
+      type: "object",
+      properties: { about: { type: "string", description: "Words identifying the rule" } },
+      required: ["about"],
+    },
+    async execute(args, ctx) {
+      if (!ctx.userId) return { ok: false, error: "not signed in" };
+      const n = await userCtx.removeInstruction(ctx.userId, args.about);
+      if (!n) return { ok: false, error: "no matching rule found" };
+      return { ok: true, data: { removed: n }, speak: "Done, rule removed." };
+    },
+  });
+
+  registry.register({
+    name: "configure_assistant",
+    description:
+      "Change the ASSISTANT's own identity when the user asks — its name " +
+      "('I'll call you Maya'), gender presentation, or communication style " +
+      "(concise/friendly/formal).",
+    risk: "medium",
+    inputSchema: {
+      type: "object",
+      properties: {
+        name: { type: "string", description: "New assistant name, e.g. Maya" },
+        gender: { type: "string", description: "female, male or neutral" },
+        style: { type: "string", description: "concise, friendly or formal" },
+      },
+    },
+    async execute(args, ctx) {
+      if (!ctx.userId) return { ok: false, error: "not signed in" };
+      const a = await userCtx.setAssistantProfile(ctx.userId, args);
+      return {
+        ok: true,
+        data: a,
+        speak: args.name ? `From now on I'm ${a.name}.` : "Done.",
+      };
+    },
+  });
+
   // ---------------- DEVICE ACTIONS ----------------
   // These CANNOT be performed by the server. Android/iOS require the app to
   // initiate them, so the tool returns an authorized action for the app and

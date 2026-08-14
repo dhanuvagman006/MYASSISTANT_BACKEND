@@ -80,4 +80,64 @@ router.get("/", async (req, res) => {
   }
 });
 
+
+// ---- Phase: onboarding + assistant personalization (§3/§4/§28) ----
+const userCtx = require("../users/context");
+const uidOf2 = (req) => Number(req.user?.sub);
+
+// Full profile incl. assistant identity, for Settings.
+router.get("/full", async (req, res) => {
+  const uid = uidOf2(req);
+  if (!uid) return res.status(401).json({ error: "sign in" });
+  const p = await userCtx.getProfile(uid);
+  res.json(p || {});
+});
+
+// Structured onboarding fields (all optional — skippable, §3).
+router.put("/details", async (req, res) => {
+  const uid = uidOf2(req);
+  if (!uid) return res.status(401).json({ error: "sign in" });
+  const p = await userCtx.updateProfile(uid, req.body || {});
+  res.json(p);
+});
+
+// CONVERSATIONAL onboarding: free text/speech in, structured fields out.
+router.post("/conversational", async (req, res) => {
+  const uid = uidOf2(req);
+  if (!uid) return res.status(401).json({ error: "sign in" });
+  const out = await userCtx.extractProfile(uid, req.body?.text);
+  res.json(out);
+});
+
+// Assistant identity (name/gender/voice/style).
+router.put("/assistant", async (req, res) => {
+  const uid = uidOf2(req);
+  if (!uid) return res.status(401).json({ error: "sign in" });
+  const a = await userCtx.setAssistantProfile(uid, req.body || {});
+  res.json({ assistant: a });
+});
+
+// Standing rules management for Settings.
+router.get("/instructions", async (req, res) => {
+  const uid = uidOf2(req);
+  if (!uid) return res.status(401).json({ error: "sign in" });
+  res.json({ instructions: await userCtx.listInstructions(uid) });
+});
+router.post("/instructions", async (req, res) => {
+  const uid = uidOf2(req);
+  if (!uid) return res.status(401).json({ error: "sign in" });
+  const r = await userCtx.addInstruction(uid, req.body?.instruction);
+  res.status(201).json({ instruction: r });
+});
+router.delete("/instructions/:id", async (req, res) => {
+  const uid = uidOf2(req);
+  if (!uid) return res.status(401).json({ error: "sign in" });
+  await require("../db").run(
+    `UPDATE user_instructions SET active=0, deactivated_at=$3
+      WHERE user_id=$1 AND id=$2`,
+    [uid, Number(req.params.id), Date.now()]
+  );
+  res.json({ ok: true });
+});
+
 module.exports = router;

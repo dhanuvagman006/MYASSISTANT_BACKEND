@@ -65,9 +65,9 @@ function authorize(url) {
 
 /// The system prompt for live mode. Kept short: the live model speaks, so
 /// the TTS-formatting rules from the text prompt don't apply.
-function liveSystemPrompt() {
+function liveSystemPrompt(assistantName = "Hari") {
   return (
-    "You are Hari, a warm, quick-witted personal voice assistant from India. " +
+    `You are ${assistantName}, a warm, quick-witted personal voice assistant from India. ` +
     "You are SPEAKING with the user in real time. Reply in the same language " +
     "the user speaks — English, Kannada, Hindi, or any mix. Keep replies " +
     "short and conversational, one thought at a time, like a friend on a " +
@@ -79,13 +79,25 @@ function liveSystemPrompt() {
 /**
  * Bridges one app socket to one Gemini Live session.
  */
-function bridge(appWs) {
+async function bridge(appWs, user) {
   const key = process.env.GEMINI_API_KEY;
   if (!key) {
     appWs.send(JSON.stringify({ type: "error", message: "no API key" }));
     appWs.close();
     return;
   }
+
+  // The assistant's configured name (Settings → Assistant). Resolved per
+  // session so a rename applies to the very next live call. Anonymous dev
+  // sessions fall back to the default.
+  let assistantName = "Hari";
+  try {
+    const uid = Number(user?.sub);
+    if (Number.isFinite(uid) && uid > 0) {
+      const p = await require("../users/context").getProfile(uid);
+      if (p?.assistant?.name) assistantName = p.assistant.name;
+    }
+  } catch (_) {}
 
   let upstream;
   let upstreamReady = false;
@@ -126,7 +138,7 @@ function bridge(appWs) {
               },
             },
           },
-          systemInstruction: { parts: [{ text: liveSystemPrompt() }] },
+          systemInstruction: { parts: [{ text: liveSystemPrompt(assistantName) }] },
           // Transcripts of both sides let the app render its chat bubbles
           // even though no text ever drives the conversation.
           inputAudioTranscription: {},
@@ -268,7 +280,7 @@ function attachWs(server) {
       socket.destroy();
       return;
     }
-    wss.handleUpgrade(req, socket, head, (ws) => bridge(ws));
+    wss.handleUpgrade(req, socket, head, (ws) => bridge(ws, user));
   });
 }
 

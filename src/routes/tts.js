@@ -32,9 +32,20 @@ router.post("/", async (req, res) => {
       : undefined;
 
   try {
+    // The assistant's configured voice (Settings → Assistant) applies
+    // unless this request names one explicitly.
+    let voice =
+      typeof req.body?.voice === "string" ? req.body.voice : undefined;
+    const uid = Number(req.user?.sub);
+    if (!voice && Number.isFinite(uid) && uid > 0) {
+      try {
+        const p = await require("../users/context").getProfile(uid);
+        voice = p?.assistant?.voice || undefined;
+      } catch (_) {}
+    }
     const { wav } = await synthesizeSpeech(text, {
       language: clean2(req.body?.language),
-      voice: typeof req.body?.voice === "string" ? req.body.voice : undefined,
+      voice,
     });
     res.setHeader("Content-Type", "audio/wav");
     res.setHeader("Content-Length", wav.length);
