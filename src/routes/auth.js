@@ -88,7 +88,8 @@ router.post("/google", async (req, res) => {
       name: p.name,
     });
     respond(res, user, created);
-  } catch {
+  } catch (e) {
+    console.error("Google verifyIdToken error:", e);
     res.status(401).json({ error: "invalid Google token" });
   }
 });

@@ -569,8 +569,8 @@ router.post("/:sid/audio", upload.single("audio"), async (req, res) => {
     });
     if (!firstSttFailure) {
       emit(s, {
-        type: "assistant_message",
-        text: sttError
+        type: "error",
+        message: sttError
           ? "My speech service isn't responding right now. Please check the server logs — your microphone is fine."
           : "Sorry, I couldn't hear that clearly. Could you say it again?",
       });

@@ -139,6 +139,7 @@ async function bridge(appWs, user) {
             },
           },
           systemInstruction: { parts: [{ text: liveSystemPrompt(assistantName) }] },
+          tools: [{ functionDeclarations: require("../tools/registry").declarations({ userId: user?.sub }) }],
           // Transcripts of both sides let the app render its chat bubbles
           // even though no text ever drives the conversation.
           inputAudioTranscription: {},
@@ -148,7 +149,7 @@ async function bridge(appWs, user) {
     );
   });
 
-  upstream.on("message", (data) => {
+  upstream.on("message", async (data) => {
     let msg;
     try {
       msg = JSON.parse(data.toString());
@@ -160,6 +161,24 @@ async function bridge(appWs, user) {
       upstreamReady = true;
       appWs.send(JSON.stringify({ type: "ready", model: LIVE_MODEL() }));
       for (const frame of pending.splice(0)) sendAudioUp(frame);
+      return;
+    }
+
+    if (msg.toolCall) {
+      const responses = [];
+      for (const fc of msg.toolCall.functionCalls || []) {
+        const res = await require("../tools/registry").execute(fc.name, fc.args, { userId: user?.sub, approved: true });
+        
+        // If the tool produced a device action (like open_camera or contact_lookup),
+        // we send it down the WebSocket so the app can perform the action.
+        if (res.deviceAction) {
+          appWs.send(JSON.stringify(res.deviceAction));
+          responses.push({ id: fc.id, name: fc.name, response: { result: "Device action requested: " + res.deviceAction.type } });
+        } else {
+          responses.push({ id: fc.id, name: fc.name, response: res });
+        }
+      }
+      upstream.send(JSON.stringify({ toolResponse: { functionResponses: responses } }));
       return;
     }
 

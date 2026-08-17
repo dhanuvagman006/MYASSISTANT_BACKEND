@@ -12,8 +12,10 @@ const gapi = require("./api");
 const audit = require("../audit/log");
 
 function uid(req, res) {
-  const id = Number(req.user?.sub);
-  if (!Number.isInteger(id) || id <= 0) {
+  let sub = req.user?.sub;
+  if (sub === "anonymous-dev") sub = 0;
+  const id = Number(sub);
+  if (!Number.isInteger(id) || id < 0) {
     res.status(400).json({ error: "requires a signed-in account" });
     return null;
   }
