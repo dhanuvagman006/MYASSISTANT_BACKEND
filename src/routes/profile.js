@@ -26,10 +26,12 @@ router.post("/survey", async (req, res) => {
   const uid = uidOf(req);
   if (!uid) return res.status(401).json({ error: "sign in required" });
 
-  const { name, location, gender, preferences } = req.body || {};
+  const { name, location, gender, birthday, preferences } = req.body || {};
   const cleanName = typeof name === "string" ? name.trim().slice(0, 80) : "";
   const cleanLoc =
     typeof location === "string" ? location.trim().slice(0, 120) : "";
+  const cleanBirthday =
+    typeof birthday === "string" ? birthday.trim().slice(0, 20) : "";
   const prefs = Array.isArray(preferences)
     ? preferences
         .filter((p) => typeof p === "string" && p.trim())
@@ -43,6 +45,10 @@ router.post("/survey", async (req, res) => {
     }
     if (gender !== undefined) {
       await db.setGender(uid, gender);
+    }
+    if (cleanBirthday) {
+      await db.setBirthday(uid, cleanBirthday);
+      await memory.saveMemory(uid, `User's birthday is ${cleanBirthday}`, 3);
     }
     if (cleanName) {
       await memory.saveMemory(uid, `User's name is ${cleanName}`, 3);

@@ -22,6 +22,7 @@ const places = require("./tools/places");
 const currency = require("./tools/currency");
 const units = require("./tools/units");
 const news = require("./tools/news");
+const astrology = require("./tools/astrology");
 const reminders = require("../reminders/store");
 const docsStore = require("../docs/store");
 const clientsStore = require("../clients/store");
@@ -34,6 +35,7 @@ const RE = {
   remindList: /\b((what|list|show|any).{0,20}reminders?|my reminders)\b/i,
   weather: /\b(weather|temperature|forecast|rain(ing)?|hot|cold) (today|now|outside|tomorrow|in\b)|\bweather\b|\bforecast\b|\bumbrella\b/i,
   news: /\b(news|headlines?|what('| i)?s happening)\b/i,
+  astrology: /\b(astrolog(y|ical)|horoscope|zodiac|rashifal|kundli|rashi|lucky (day|number|color|today)|daily prediction|motivation(al)?|quote(s)?|inspire me|positive thought)\b/i,
   email: /\b(email|emails|mail|inbox|gmail)\b/i,
   calendar: /\b(calendar|meeting|meetings|appointments?|schedule|events?|agenda)\b/i,
   inCity: /\b(?:in|at|for) ([A-Za-z][A-Za-z .'-]{2,40})\s*\??$/i,
@@ -647,7 +649,37 @@ async function buildToolContext({ userId, messages, tzOffsetMin = 330, lat, lng 
         }
       }
 
-      // ---- MORNING BRIEFING (C2): weather + reminders + calendar + news in ONE reply ----
+      // ---- ASTROLOGY & DAILY MOTIVATION (FreeAstrologyAPI) ----
+      if (RE.astrology.test(msg)) {
+        let birthday = null;
+        let userName = "Friend";
+        if (userId) {
+          try {
+            const user = await require("../db").findById(userId);
+            if (user?.birthday) birthday = user.birthday;
+            if (user?.name) userName = user.name;
+          } catch (_) {}
+        }
+        try {
+          const reading = await astrology.getAstrologyReading({
+            birthday,
+            name: userName,
+            date: now,
+            lat,
+            lng,
+          });
+          const d = astrology.describeAstrology(reading, userName);
+          if (d) {
+            blocks.push(
+              "TOOL RESULT — LIVE " + d +
+              "\nRespond enthusiastically! Tell them today is their lucky day, give their zodiac daily insight, lucky numbers/colors, and share the motivational quote to make them feel empowered and confident."
+            );
+            sources.push({ name: "Free Astrology API", url: "https://freeastrologyapi.com" });
+          }
+        } catch (_) {}
+      }
+
+      // ---- MORNING BRIEFING (C2): weather + astrology + reminders + calendar + news in ONE reply ----
       if (RE.briefing.test(msg)) {
         const parts = [];
         try {
@@ -659,6 +691,21 @@ async function buildToolContext({ userId, messages, tzOffsetMin = 330, lat, lng 
           }
         } catch (_) {}
         if (userId) {
+          try {
+            const user = await require("../db").findById(userId);
+            const reading = await astrology.getAstrologyReading({
+              birthday: user?.birthday,
+              name: user?.name || "Friend",
+              date: now,
+              lat,
+              lng,
+            });
+            if (reading) {
+              parts.push(`DAILY ASTROLOGY & LUCK (${reading.zodiacSign}): Today is your lucky day! Lucky number ${reading.luckyNumber}, color ${reading.luckyColor}. ${reading.affirmation} Motivational quote: ${reading.quote}`);
+              sources.push({ name: "Free Astrology API", url: "https://freeastrologyapi.com" });
+            }
+          } catch (_) {}
+
           const listing = await reminders.upcomingText(userId);
           parts.push("PENDING REMINDERS: " + (listing || "(none)"));
           if (await gtokens.isConnected(userId)) {
@@ -687,7 +734,7 @@ async function buildToolContext({ userId, messages, tzOffsetMin = 330, lat, lng 
         blocks.push(
           "TOOL RESULT — LIVE data for the user's DAILY BRIEFING:\n" +
             parts.join("\n") +
-            "\nCompose a warm spoken briefing in the user's language: a short greeting, the weather in one line, today's calendar and pending reminders (skip gracefully if empty), then 2-3 headlines. Keep it under 30 seconds of speech; do not read URLs."
+            "\nCompose a warm spoken briefing in the user's language: greet them enthusiastically (e.g. 'Hello! Today is your lucky day!'), the weather in one line, today's astrological energy & inspiring quote, calendar and pending reminders (skip gracefully if empty), then 2 headlines. Keep it under 35 seconds of speech; do not read URLs."
         );
       }
 

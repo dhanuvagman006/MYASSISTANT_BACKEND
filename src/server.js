@@ -166,9 +166,10 @@ app.use("/reminders", appAuth, require("./reminders/routes"));
 // ADMIN — read-only ops stats behind a static key (set ADMIN_KEY).
 app.use("/admin", require("./routes/admin"));
 
-// Live data for the Today screen (weather card, headlines).
+// Live data for the Today screen (weather card, headlines, astrology).
 const wxTool = require("./services/tools/weather");
 const newsTool = require("./services/tools/news");
+const astroTool = require("./services/tools/astrology");
 app.get("/tools/weather", appAuth, async (req, res) => {
   try {
     const w = await wxTool.getWeather({
@@ -187,6 +188,29 @@ app.get("/tools/news", appAuth, async (req, res) => {
     res.json({ headlines: await newsTool.getHeadlines({ topic: req.query.topic }) });
   } catch (e) {
     res.status(502).json({ error: "news unavailable" });
+  }
+});
+app.get("/tools/astrology", appAuth, async (req, res) => {
+  try {
+    const uid = Number(req.user?.sub);
+    let birthday = req.query.birthday;
+    let name = "Friend";
+    if (uid) {
+      const u = await require("./db").findById(uid);
+      if (u) {
+        if (!birthday && u.birthday) birthday = u.birthday;
+        if (u.name) name = u.name;
+      }
+    }
+    const reading = await astroTool.getAstrologyReading({
+      birthday,
+      name,
+      lat: parseFloat(req.query.lat),
+      lng: parseFloat(req.query.lng),
+    });
+    res.json(reading);
+  } catch (e) {
+    res.status(502).json({ error: "astrology unavailable" });
   }
 });
 

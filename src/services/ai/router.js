@@ -505,12 +505,13 @@ async function transcribeAudio(buffer, mimeType, opts = {}) {
   }
 }
 
-// ---------------- TEXT-TO-SPEECH (GEMINI NATIVE) ----------------
-// Gemini's TTS models turn text into high-fidelity neural speech using the
-// SAME GEMINI_API_KEY. Output is raw 16-bit PCM (little-endian, mono,
-// 24 kHz) as base64 — we wrap it in a WAV header so the phone can play it
-// with a plain audio player. This replaces the robotic on-device voice.
+// ---------------- TEXT-TO-SPEECH ----------------
+// Provider chain: SARVAM BULBUL v3 first for Indian languages (11 languages,
+// 35+ natural voices, sub-250ms first-byte, native Hinglish/code-mix), then
+// GEMINI as the fallback for all other languages or when Sarvam is unset/down.
+// Both providers return WAV audio that the phone plays with a plain player.
 
+// ---- Gemini TTS config ----
 // Default voices per Gemini TTS: warm, natural, well-suited to an assistant.
 // Full list (30): Kore, Puck, Zephyr, Charon, Leda, Aoede, Callirrhoe, etc.
 const TTS_DEFAULT_VOICE = envModel("GEMINI_TTS_VOICE", "Kore");
@@ -525,6 +526,28 @@ const TTS_VOICES = new Set([
   "Alnilam", "Schedar", "Gacrux", "Pulcherrimo", "Achird", "Zubenelgenubi",
   "Vindemiatrix", "Sadachbia", "Sadaltager", "Sulafat",
 ]);
+
+// ---- Sarvam Bulbul v3 config ----
+// ISO-639-1 → BCP-47 for Sarvam's 11 supported languages. Keys that appear
+// here route through Sarvam when the key is set; everything else → Gemini.
+const SARVAM_LANG_MAP = {
+  en: "en-IN", hi: "hi-IN", kn: "kn-IN", te: "te-IN", ta: "ta-IN",
+  ml: "ml-IN", bn: "bn-IN", pa: "pa-IN", gu: "gu-IN", mr: "mr-IN",
+  od: "od-IN", or: "od-IN", // Odia: both ISO codes
+};
+
+const SARVAM_DEFAULT_VOICE = String(
+  process.env.SARVAM_TTS_VOICE || "shubh"
+).split("#")[0].trim().toLowerCase() || "shubh";
+
+// Known Sarvam speaker voices (validated so a bad env/body can't 400 us).
+const SARVAM_VOICES = new Set([
+  "shubh", "shreya", "manan", "ishita", "aditya", "ritu", "priya",
+  "simran", "anand", "roopa", "neha", "rahul", "pooja", "rohan",
+  "kavya", "amit", "dev", "ratan", "varun",
+]);
+
+const SARVAM_TTS_TIMEOUT_MS = 10_000;
 
 // Wrap raw PCM (s16le) in a minimal WAV container so any player accepts it.
 function pcmToWav(pcm, sampleRate = TTS_SAMPLE_RATE, channels = 1, bits = 16) {
@@ -547,11 +570,57 @@ function pcmToWav(pcm, sampleRate = TTS_SAMPLE_RATE, channels = 1, bits = 16) {
   return Buffer.concat([header, pcm]);
 }
 
+// ---- Sarvam Bulbul v3 synthesizer ----
+
 /**
- * Synthesize [text] to speech. Returns a WAV Buffer (24 kHz mono PCM).
- * [opts.voice] overrides the default voice; [opts.language] biases accent.
+ * Synthesize [text] via Sarvam Bulbul v3.
+ * Returns { wav: Buffer, voice: string, sampleRate: number, provider: 'sarvam' }
+ * or throws on any failure (caller falls back to Gemini).
  */
-async function synthesizeSpeech(text, opts = {}) {
+async function synthesizeSpeechSarvam(text, languageCode, speaker) {
+  const key = process.env.SARVAM_API_KEY;
+  if (!key) throw new Error("sarvam tts: key missing");
+
+  const voice = SARVAM_VOICES.has(speaker) ? speaker : SARVAM_DEFAULT_VOICE;
+
+  const r = await fetch("https://api.sarvam.ai/text-to-speech", {
+    method: "POST",
+    headers: {
+      "content-type": "application/json",
+      "api-subscription-key": key,
+    },
+    signal: AbortSignal.timeout(SARVAM_TTS_TIMEOUT_MS),
+    body: JSON.stringify({
+      text,
+      model: "bulbul:v3",
+      language_code: languageCode,
+      speaker: voice,
+      pace: 1.0,
+      output_audio_codec: "wav",
+      speech_sample_rate: 24000,
+    }),
+  });
+
+  if (!r.ok) {
+    const body = await r.text().catch(() => "");
+    throw new Error(`sarvam tts ${r.status} ${body.slice(0, 300)}`);
+  }
+
+  const data = await r.json();
+  const b64 = data.audios?.[0];
+  if (!b64) throw new Error("sarvam tts: no audio returned");
+
+  const wav = Buffer.from(b64, "base64");
+  return { wav, voice, sampleRate: 24000, provider: "sarvam" };
+}
+
+// ---- Gemini TTS synthesizer ----
+
+/**
+ * Synthesize [text] via Gemini native TTS. The original implementation —
+ * kept intact as the fallback path.
+ */
+async function synthesizeSpeechGemini(text, opts = {}) {
   const key = requireKey();
   const clean = String(text || "").trim();
   if (!clean) throw new Error("tts: empty text");
@@ -589,7 +658,7 @@ async function synthesizeSpeech(text, opts = {}) {
     // Timeouts are as transient as 503s here — one quick retry.
     if (!opts._retried && isTransient(0, e)) {
       await sleep(700);
-      return synthesizeSpeech(text, { ...opts, _retried: true });
+      return synthesizeSpeechGemini(text, { ...opts, _retried: true });
     }
     throw e;
   }
@@ -600,7 +669,7 @@ async function synthesizeSpeech(text, opts = {}) {
     // the robotic on-device voice mid-reply.
     if ((r.status === 503 || r.status === 429) && !opts._retried) {
       await new Promise((res) => setTimeout(res, 700));
-      return synthesizeSpeech(text, { ...opts, _retried: true });
+      return synthesizeSpeechGemini(text, { ...opts, _retried: true });
     }
     throw new Error(`gemini tts ${r.status} ${body.slice(0, 300)}`);
   }
@@ -617,7 +686,41 @@ async function synthesizeSpeech(text, opts = {}) {
   const rate = rateMatch ? parseInt(rateMatch[1], 10) : TTS_SAMPLE_RATE;
 
   const pcm = Buffer.from(b64, "base64");
-  return { wav: pcmToWav(pcm, rate), voice, sampleRate: rate };
+  return { wav: pcmToWav(pcm, rate), voice, sampleRate: rate, provider: "gemini" };
+}
+
+// ---- Public TTS entry point (provider chain) ----
+
+/**
+ * Synthesize [text] to speech. Returns { wav, voice, sampleRate, provider }.
+ *
+ * Provider chain: SARVAM first for supported Indian languages when
+ * SARVAM_API_KEY is set, then GEMINI as the universal fallback. A Sarvam
+ * failure (timeout, 4xx/5xx, empty audio) falls through silently — the
+ * user hears the warm Gemini voice instead, never silence.
+ *
+ * [opts.voice] overrides the default voice; [opts.language] biases accent.
+ */
+async function synthesizeSpeech(text, opts = {}) {
+  const clean = String(text || "").trim();
+  if (!clean) throw new Error("tts: empty text");
+
+  // Try Sarvam for supported Indian languages when the key is available.
+  const lang = typeof opts.language === "string" ? opts.language.toLowerCase() : "";
+  const sarvamLang = SARVAM_LANG_MAP[lang];
+
+  if (sarvamLang && process.env.SARVAM_API_KEY) {
+    try {
+      return await synthesizeSpeechSarvam(clean, sarvamLang, opts.voice);
+    } catch (e) {
+      // Log and fall through to Gemini — never let a Sarvam outage
+      // silence the assistant.
+      console.warn(`sarvam tts failed (falling back to gemini): ${e.message}`);
+    }
+  }
+
+  // Fallback: Gemini native TTS (all languages, same API key as chat).
+  return synthesizeSpeechGemini(text, opts);
 }
 
 

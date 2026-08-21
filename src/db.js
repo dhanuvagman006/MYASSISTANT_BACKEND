@@ -68,11 +68,12 @@ async function init() {
       provider_sub  TEXT,                            -- Google/Apple stable user id
       created_at    BIGINT NOT NULL,
       gender        TEXT,   -- 'male' | 'female' | 'other' | NULL (unset)
-      UNIQUE(provider, provider_sub)
+      birthday      TEXT    -- 'YYYY-MM-DD' | NULL
     );
 
-    -- Migration for databases created before the gender column existed.
+    -- Migration for databases created before gender/birthday columns existed.
     ALTER TABLE users ADD COLUMN IF NOT EXISTS gender TEXT;
+    ALTER TABLE users ADD COLUMN IF NOT EXISTS birthday TEXT;
 
     -- AUDIT LOG (Phase 1 / ADR-004): one row for every action the assistant
     -- performs on the user's behalf that touches the outside world or
@@ -262,11 +263,11 @@ async function findByProvider(provider, sub) {
   return one("SELECT * FROM users WHERE provider = $1 AND provider_sub = $2", [provider, sub]);
 }
 
-async function createUser({ email, name, passwordHash = null, provider = "email", providerSub = null, gender = null }) {
+async function createUser({ email, name, passwordHash = null, provider = "email", providerSub = null, gender = null, birthday = null }) {
   return one(
-    `INSERT INTO users (email, name, password_hash, provider, provider_sub, created_at, gender)
-     VALUES ($1, $2, $3, $4, $5, $6, $7) RETURNING *`,
-    [email ? email.toLowerCase() : null, name || null, passwordHash, provider, providerSub, Date.now(), gender]
+    `INSERT INTO users (email, name, password_hash, provider, provider_sub, created_at, gender, birthday)
+     VALUES ($1, $2, $3, $4, $5, $6, $7, $8) RETURNING *`,
+    [email ? email.toLowerCase() : null, name || null, passwordHash, provider, providerSub, Date.now(), gender, birthday || null]
   );
 }
 
@@ -280,6 +281,12 @@ function cleanGender(g) {
 
 async function setGender(userId, gender) {
   await run("UPDATE users SET gender = $1 WHERE id = $2", [cleanGender(gender), Number(userId)]);
+  return findById(userId);
+}
+
+async function setBirthday(userId, birthday) {
+  const b = typeof birthday === "string" && birthday.trim() ? birthday.trim().slice(0, 20) : null;
+  await run("UPDATE users SET birthday = $1 WHERE id = $2", [b, Number(userId)]);
   return findById(userId);
 }
 
@@ -312,11 +319,18 @@ async function upsertSocialUser({ provider, sub, email, name }) {
 
 /** Shape sent to clients — never includes password_hash. */
 function publicUser(u) {
-  return { id: u.id, email: u.email, name: u.name, provider: u.provider, gender: u.gender || null };
+  return {
+    id: u.id,
+    email: u.email,
+    name: u.name,
+    provider: u.provider,
+    gender: u.gender || null,
+    birthday: u.birthday || null,
+  };
 }
 
 module.exports = {
   pool, query, one, run, tx, init, close,
   findByEmail, findById, upsertSocialUser, createUser, publicUser,
-  cleanGender, setGender,
+  cleanGender, setGender, setBirthday,
 };

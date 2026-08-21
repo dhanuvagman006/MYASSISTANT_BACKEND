@@ -54,12 +54,12 @@ const uidOk = (u) => Number.isFinite(Number(u)) && Number(u) > 0;
 
 /* ---------------- profile ---------------- */
 
-const PROFILE_FIELDS = ["profession", "organisation", "location", "preferred_language", "timezone"];
+const PROFILE_FIELDS = ["profession", "organisation", "location", "preferred_language", "timezone", "birthday"];
 
 async function getProfile(userId) {
   if (!uidOk(userId)) throw new Error("authenticated userId required");
   const u = await one(
-    `SELECT id, name, gender, profession, organisation, location,
+    `SELECT id, name, gender, birthday, profession, organisation, location,
             preferred_language, timezone FROM users WHERE id=$1`,
     [userId]
   );
